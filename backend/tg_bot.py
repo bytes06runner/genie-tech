@@ -63,6 +63,13 @@ from market_monitor import (
 )
 from swarm_brain import run_swarm
 from memory_manager import log_memory
+from rule_engine import (
+    DynamicRuleEngine,
+    GrowwMockExecutor,
+    evaluate_all_rules,
+    set_rule_notify,
+    get_smart_suggestions,
+)
 
 load_dotenv()
 logging.basicConfig(
@@ -70,6 +77,8 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("tg_bot")
+
+import time as _time
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://webapp-ten-fawn-33.vercel.app")
@@ -132,7 +141,7 @@ async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Use `/start` first to create your profile.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    connect_url = f"{WEBAPP_URL}?mode=connect"
+    connect_url = f"{WEBAPP_URL}?mode=connect&_t={int(_time.time())}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             text="🔗 Connect Lute Wallet",
@@ -497,7 +506,7 @@ async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    transact_url = f"{WEBAPP_URL}?mode=transact"
+    transact_url = f"{WEBAPP_URL}?mode=transact&_t={int(_time.time())}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             text="⚡ Open Algorand Bridge",
@@ -532,13 +541,21 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /close `<id>` — Close a paper trade\n"
         "  /monitors — Active price watchers\n"
         "  /cancel `<job_id>` — Stop a monitor\n"
+        "  /set\\_rule `<rule>` — Create automation rule\n"
+        "  /my\\_rules — View all your rules\n"
+        "  /delete\\_rule `<id>` — Remove a rule\n"
+        "  /suggest — AI-powered smart suggestions\n"
+        "  /mock\\_trade `<asset> <amount>` — Execute mock Groww trade\n"
+        "  /trade\\_history — View Groww mock trade log\n"
         "  /help — This message\n\n"
         "*How it works:*\n"
         "1️⃣ `/analyze XAU/USD` triggers the Gemini AI Swarm\n"
         "2️⃣ If the swarm says 'monitor\\_and\\_execute', a background job watches the price every 5 min\n"
         "3️⃣ When the target is hit, the bot auto-executes a paper trade and DMs you\n"
-        "4️⃣ `/transact` opens the Web3 Mini App for real Algorand TestNet transactions\n\n"
-        "_Powered by Gemini 2.5 Flash + Groq + Algorand + Lute_"
+        "4️⃣ `/transact` opens the Web3 Mini App for real Algorand TestNet transactions\n"
+        "5️⃣ `/set_rule` creates dynamic automation rules evaluated every 60s\n"
+        "6️⃣ Voice commands from the web dashboard trigger actions here via Bridge\n\n"
+        "_Powered by Gemini 2.5 Flash + Groq + Algorand + Lute + Groww Mock_"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -552,6 +569,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+
+    # Check if this looks like a rule-setting natural language command
+    rule_keywords = ["if ", "when ", "rule:", "automate ", "set rule"]
+    if any(text.lower().startswith(kw) or kw in text.lower()[:30] for kw in rule_keywords):
+        await _handle_natural_rule(update, tg_id, text)
+        return
+
     await update.message.reply_text("🧠 _Processing with AI Swarm …_", parse_mode=ParseMode.MARKDOWN)
 
     try:
@@ -567,6 +591,239 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
 
 
+async def _handle_natural_rule(update: Update, tg_id: int, text: str):
+    """Parse natural language into a trading rule via Groq."""
+    await update.message.reply_text("⚙️ _Parsing your rule with AI…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        from groq import Groq
+        import os
+        groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+        prompt = f"""Parse this trading rule into JSON:
+"{text}"
+
+Return ONLY valid JSON:
+{{
+    "name": "short descriptive name",
+    "asset": "TICKER",
+    "conditions": {{
+        "price_below": number or null,
+        "price_above": number or null,
+        "rsi_below": number or null,
+        "rsi_above": number or null,
+        "sentiment": "bullish" or "bearish" or null,
+        "logic": "AND"
+    }},
+    "action_type": "buy" or "sell",
+    "amount_usd": number (default 100)
+}}"""
+
+        resp = groq.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=300,
+        )
+        raw = resp.choices[0].message.content
+        json_start = raw.find('{')
+        json_end = raw.rfind('}') + 1
+        parsed = json.loads(raw[json_start:json_end])
+
+        # Clean null values from conditions
+        conditions = {k: v for k, v in parsed.get("conditions", {}).items() if v is not None}
+
+        rule = await DynamicRuleEngine.create_rule(
+            tg_id=tg_id,
+            name=parsed.get("name", "Custom Rule"),
+            asset=parsed.get("asset", "UNKNOWN"),
+            conditions=conditions,
+            action_type=parsed.get("action_type", "buy"),
+            amount_usd=parsed.get("amount_usd", 100.0),
+        )
+
+        conditions_str = json.dumps(conditions, indent=2)
+        await update.message.reply_text(
+            f"✅ *Rule Created!*\n\n"
+            f"📋 Name: `{rule['name']}`\n"
+            f"📊 Asset: `{rule['asset']}`\n"
+            f"⚙️ Conditions:\n```\n{conditions_str}\n```\n"
+            f"💰 Action: `{rule['action_type']}` $`{rule['amount_usd']:.2f}`\n"
+            f"🆔 Rule ID: `{rule['id']}`\n\n"
+            f"_This rule is evaluated every 60 seconds. Trades execute via Groww Mock._",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not parse rule: {str(e)[:200]}")
+
+
+# ═══════════════════════════════════════════════════════
+#  Rule Engine Commands
+# ═══════════════════════════════════════════════════════
+
+async def cmd_set_rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /set_rule — create a dynamic trading rule."""
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "⚙️ *Create a Trading Rule*\n\n"
+            "*Usage:* `/set_rule <natural language rule>`\n\n"
+            "*Examples:*\n"
+            "• `/set_rule Buy AAPL if price below 180`\n"
+            "• `/set_rule Sell BTC when RSI above 70`\n"
+            "• `/set_rule Buy gold if RSI below 30 and sentiment is bullish`\n\n"
+            "_Or just type a rule in plain text like:_\n"
+            "\"If AAPL drops below 175, buy $200 worth\"",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = " ".join(context.args)
+    await _handle_natural_rule(update, tg_id, text)
+
+
+async def cmd_my_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /my_rules — list all user rules."""
+    tg_id = update.effective_user.id
+    rules = await DynamicRuleEngine.get_user_rules(tg_id)
+
+    if not rules:
+        await update.message.reply_text(
+            "📋 No rules yet. Use `/set_rule` to create one.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = f"⚙️ *Your Trading Rules ({len(rules)}):*\n\n"
+    for r in rules:
+        conditions = json.loads(r["conditions"]) if isinstance(r["conditions"], str) else r["conditions"]
+        status_emoji = "🟢" if r["status"] == "active" else "🟡"
+        text += (
+            f"{status_emoji} *{r['name']}*\n"
+            f"  Asset: `{r['asset']}` | Action: `{r['action_type']}` $`{r['amount_usd']:.0f}`\n"
+            f"  Triggered: {r['trigger_count']}x | ID: `{r['id']}`\n\n"
+        )
+
+    text += "Delete with `/delete_rule <id>`"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_delete_rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /delete_rule — remove a rule."""
+    if not context.args:
+        await update.message.reply_text("⚙️ *Usage:* `/delete_rule <rule_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    rule_id = context.args[0]
+    await DynamicRuleEngine.delete_rule(rule_id)
+    await update.message.reply_text(f"🗑️ Rule `{rule_id}` deleted.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_suggest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /suggest — AI-powered smart suggestions based on user's rules and trades."""
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await update.message.reply_text("🧠 _Analyzing your rules and trades…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        suggestions = await get_smart_suggestions(tg_id)
+        await update.message.reply_text(suggestions, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not generate suggestions: {str(e)[:200]}")
+
+
+async def cmd_mock_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /mock_trade — execute a Groww mock trade manually."""
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "💹 *Groww Mock Trade*\n\n"
+            "*Usage:* `/mock_trade <asset> <amount>`\n\n"
+            "*Examples:*\n"
+            "• `/mock_trade AAPL 200`\n"
+            "• `/mock_trade BTC 500`\n"
+            "• `/mock_trade RELIANCE 150`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    asset = context.args[0].upper()
+    try:
+        amount = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid amount. Use a number like `200`.")
+        return
+
+    await update.message.reply_text(f"💹 _Executing mock trade on Groww for `{asset}`…_", parse_mode=ParseMode.MARKDOWN)
+
+    price = await fetch_current_price(asset)
+    if price is None:
+        price = 100.0  # fallback for demo
+        await update.message.reply_text(f"ℹ️ _Could not fetch live price for {asset}, using $100.00 demo price._", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        result = await GrowwMockExecutor.execute_trade(
+            tg_id=tg_id,
+            asset=asset,
+            side="buy",
+            quantity_usd=amount,
+            market_price=price,
+        )
+
+        await update.message.reply_text(
+            f"✅ *Groww Mock Trade Filled!*\n\n"
+            f"📋 Order: `{result['order_id']}`\n"
+            f"📊 Asset: `{result['asset']}`\n"
+            f"💰 Amount: `${result['quantity_usd']:.2f}`\n"
+            f"📈 Market: `${result['market_price']:.4f}`\n"
+            f"📈 Filled: `${result['execution_price']:.4f}`\n"
+            f"📉 Slippage: `{result['slippage_pct']:.3f}%`\n"
+            f"💸 Fee: `${result['fee_usd']:.4f}`\n"
+            f"💵 Net Cost: `${result['net_cost']:.2f}`\n\n"
+            f"_Platform: {result['platform']}_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Mock trade failed: {str(e)[:200]}")
+
+
+async def cmd_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /trade_history — view Groww mock trade log."""
+    tg_id = update.effective_user.id
+    trades = await GrowwMockExecutor.get_trade_history(tg_id)
+
+    if not trades:
+        await update.message.reply_text(
+            "💹 No mock trades yet. Use `/mock_trade` or set rules with `/set_rule`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = f"💹 *Groww Mock Trade History ({len(trades)}):*\n\n"
+    for t in trades[:10]:
+        text += (
+            f"📋 `{t['order_id']}`\n"
+            f"  {t['side'].upper()} `{t['asset']}` — ${t['quantity_usd']:.2f} @ ${t['execution_price']:.4f}\n"
+            f"  Slip: {t['slippage_pct']:.3f}% | Fee: ${t['fee_usd']:.4f} | {t['executed_at'][:10]}\n\n"
+        )
+
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
 async def post_init(application):
     """Set bot commands in the Telegram UI menu."""
     commands = [
@@ -580,6 +837,12 @@ async def post_init(application):
         BotCommand("close", "Close a paper trade"),
         BotCommand("monitors", "List active price monitors"),
         BotCommand("cancel", "Cancel a price monitor"),
+        BotCommand("set_rule", "Create automation rule"),
+        BotCommand("my_rules", "View your trading rules"),
+        BotCommand("delete_rule", "Remove a rule"),
+        BotCommand("suggest", "AI-powered smart suggestions"),
+        BotCommand("mock_trade", "Execute Groww mock trade"),
+        BotCommand("trade_history", "View mock trade log"),
         BotCommand("help", "Show all commands"),
     ]
     await application.bot.set_my_commands(commands)
@@ -592,7 +855,15 @@ def main():
         return
 
     set_tg_notify(tg_notify)
+    set_rule_notify(tg_notify)
     start_monitor_scheduler()
+
+    # Start rule engine evaluation loop (every 60 seconds)
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    rule_scheduler = AsyncIOScheduler()
+    rule_scheduler.add_job(evaluate_all_rules, "interval", seconds=60, id="rule_engine_tick")
+    rule_scheduler.start()
+    logger.info("⚙️ Rule engine scheduler started (60s interval)")
 
     app = (
         ApplicationBuilder()
@@ -613,6 +884,12 @@ def main():
     app.add_handler(CommandHandler("close", cmd_close))
     app.add_handler(CommandHandler("monitors", cmd_monitors))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("set_rule", cmd_set_rule))
+    app.add_handler(CommandHandler("my_rules", cmd_my_rules))
+    app.add_handler(CommandHandler("delete_rule", cmd_delete_rule))
+    app.add_handler(CommandHandler("suggest", cmd_suggest))
+    app.add_handler(CommandHandler("mock_trade", cmd_mock_trade))
+    app.add_handler(CommandHandler("trade_history", cmd_trade_history))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

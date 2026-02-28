@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -29,6 +29,14 @@ from scheduler_node import (
     get_all_tasks,
     start_scheduler,
     set_broadcast,
+)
+from yt_research import research_youtube_video, generate_pdf_base64
+from voice_intent import classify_intent
+from rule_engine import (
+    DynamicRuleEngine,
+    GrowwMockExecutor,
+    evaluate_all_rules,
+    set_rule_notify,
 )
 
 logging.basicConfig(
@@ -267,9 +275,170 @@ async def list_tasks():
     return tasks
 
 
+# ═══════════════════════════════════════════════════════
+#  YouTube Deep-Research Endpoint
+# ═══════════════════════════════════════════════════════
+
+class YouTubeRequest(BaseModel):
+    url: str = Field(..., example="https://youtube.com/watch?v=dQw4w9WgXcQ")
+
+
+class YouTubePDFRequest(BaseModel):
+    summary: dict = Field(..., description="The summary JSON object to convert to PDF")
+
+
+@app.post("/api/youtube-research")
+async def youtube_research(req: YouTubeRequest):
+    """Extract transcript from a YouTube video, summarize via Groq, return structured data."""
+    logger.info("📥 POST /api/youtube-research — URL: %s", req.url)
+    await ws_broadcast(f"[Server] 🎬 YouTube research requested: {req.url}")
+
+    result = await research_youtube_video(req.url)
+
+    if "error" in result:
+        await ws_broadcast(f"[Server] ⚠️ YouTube research failed: {result['error']}")
+        return {"status": "error", "error": result["error"]}
+
+    await ws_broadcast(
+        f"[Server] ✅ YouTube research complete — {result['transcript_length']} chars, "
+        f"sentiment: {result['summary'].get('sentiment', 'N/A')}"
+    )
+    return result
+
+
+@app.post("/api/youtube-pdf")
+async def youtube_pdf(req: YouTubePDFRequest):
+    """Generate a PDF from a YouTube research summary."""
+    logger.info("📥 POST /api/youtube-pdf — generating PDF")
+    pdf_b64 = generate_pdf_base64(req.summary)
+    return {
+        "file_b64": pdf_b64,
+        "file_mime": "application/pdf",
+        "file_type": "pdf",
+    }
+
+
+# ═══════════════════════════════════════════════════════
+#  Voice Intent Classification Endpoint
+# ═══════════════════════════════════════════════════════
+
+class VoiceCommandRequest(BaseModel):
+    transcript: str = Field(..., example="Analyze Apple stock on the daily timeframe")
+
+
+@app.post("/api/voice-intent")
+async def voice_intent(req: VoiceCommandRequest):
+    """Classify transcribed voice text into structured intent JSON via Groq."""
+    logger.info("📥 POST /api/voice-intent — '%s'", req.transcript[:80])
+    await ws_broadcast(f"[Server] 🎤 Voice command received: \"{req.transcript[:60]}…\"")
+
+    intent = await classify_intent(req.transcript)
+
+    await ws_broadcast(
+        f"[Server] 🎤 Intent: {intent.get('intent')} "
+        f"({intent.get('confidence_score', 0)*100:.0f}% confidence)"
+    )
+    return {"status": "success", "intent": intent}
+
+
+# ═══════════════════════════════════════════════════════
+#  Dynamic Rule Engine Endpoints
+# ═══════════════════════════════════════════════════════
+
+class CreateRuleRequest(BaseModel):
+    tg_id: int = Field(default=0, description="Telegram user ID (0 for web users)")
+    name: str = Field(..., example="Buy AAPL on RSI dip")
+    asset: str = Field(..., example="AAPL")
+    conditions: dict = Field(
+        ...,
+        example={"price_below": 180, "rsi_below": 30, "logic": "AND"},
+    )
+    action_type: str = Field(default="buy")
+    amount_usd: float = Field(default=100.0)
+
+
+@app.post("/api/rules")
+async def create_rule(req: CreateRuleRequest):
+    """Create a new dynamic trading rule."""
+    logger.info("📥 POST /api/rules — '%s' for %s", req.name, req.asset)
+    rule = await DynamicRuleEngine.create_rule(
+        tg_id=req.tg_id, name=req.name, asset=req.asset,
+        conditions=req.conditions, action_type=req.action_type,
+        amount_usd=req.amount_usd,
+    )
+    await ws_broadcast(f"[RuleEngine] ✅ Rule created: {req.name} — {req.asset}")
+    return {"status": "created", "rule": rule}
+
+
+@app.get("/api/rules/{tg_id}")
+async def get_rules(tg_id: int):
+    """Get all rules for a user."""
+    rules = await DynamicRuleEngine.get_user_rules(tg_id)
+    return {"rules": rules}
+
+
+@app.delete("/api/rules/{rule_id}")
+async def delete_rule(rule_id: str):
+    """Delete a rule by ID."""
+    await DynamicRuleEngine.delete_rule(rule_id)
+    return {"status": "deleted"}
+
+
+@app.get("/api/trades/{tg_id}")
+async def get_trades(tg_id: int):
+    """Get mock trade history for a user."""
+    trades = await GrowwMockExecutor.get_trade_history(tg_id)
+    return {"trades": trades}
+
+
+# ═══════════════════════════════════════════════════════
+#  Collaboration Bridge — Web → Telegram
+# ═══════════════════════════════════════════════════════
+
+class BridgeSignalRequest(BaseModel):
+    tg_user_id: int = Field(..., description="Target Telegram user ID to notify")
+    signal_type: str = Field(..., example="voice_command")
+    payload: dict = Field(..., example={"command": "Automate buying AAPL", "intent": "set_automation"})
+
+
+# Store pending signals for the Telegram bot to pick up
+_pending_signals: list[dict] = []
+
+
+@app.post("/api/bridge/signal")
+async def send_bridge_signal(req: BridgeSignalRequest):
+    """
+    Web Dashboard → Telegram Bot bridge.
+    Sends a signal from the web frontend to the Telegram bot.
+    The bot picks up these signals and DMs the user.
+    """
+    logger.info("📥 POST /api/bridge/signal — type: %s to user %d", req.signal_type, req.tg_user_id)
+
+    signal = {
+        "tg_user_id": req.tg_user_id,
+        "signal_type": req.signal_type,
+        "payload": req.payload,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    _pending_signals.append(signal)
+
+    await ws_broadcast(
+        f"[Bridge] 🌉 Signal sent to Telegram user {req.tg_user_id}: {req.signal_type}"
+    )
+    return {"status": "signal_queued", "signal": signal}
+
+
+@app.get("/api/bridge/pending")
+async def get_pending_signals():
+    """Telegram bot polls this to pick up web dashboard signals."""
+    signals = list(_pending_signals)
+    _pending_signals.clear()
+    return {"signals": signals}
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "X10V Backend", "version": "1.0.0"}
+    return {"status": "ok", "service": "X10V Backend", "version": "2.0.0"}
 
 
 @app.websocket("/ws")

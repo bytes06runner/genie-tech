@@ -1,50 +1,65 @@
-import React, { useState, useEffect, useCallback, useRef, Component } from 'react'
+import React, { useState, useEffect, useRef, Component } from 'react'
 import algosdk from 'algosdk'
-import { getAccountBalance, buildPaymentTxn, waitForConfirmation, DUMMY_RECEIVER, algodClient } from './algorand'
 
-const tg = window.Telegram?.WebApp
+// ─── Debug logger ────────────────────────────────────────────────
+const log = (msg) => {
+  const ts = new Date().toISOString().slice(11, 19)
+  console.log(`[X10V ${ts}] ${msg}`)
+  window.__log?.(`App: ${msg}`)
+}
 
+// ─── Safe Telegram SDK access ────────────────────────────────────
+let tg = null
+try {
+  tg = window.Telegram?.WebApp
+  log(`Telegram SDK: ${tg ? 'FOUND (v' + (tg.version || '?') + ')' : 'NOT FOUND'}`)
+  if (tg) {
+    tg.ready()
+    tg.expand()
+    log('tg.ready() + tg.expand() called')
+  }
+} catch (e) {
+  log(`Telegram SDK init error: ${e.message}`)
+}
+
+// ─── Safe algod client ───────────────────────────────────────────
+let algodClient = null
+try {
+  algodClient = new algosdk.Algodv2('', 'https://testnet-api.algonode.cloud', 443)
+  log('algodClient created OK')
+} catch (e) {
+  log(`algodClient creation FAILED: ${e.message}`)
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────
 function getAppMode() {
   try {
-    const params = new URLSearchParams(window.location.search)
-    return params.get('mode') || 'transact'
-  } catch {
-    return 'connect'
-  }
+    return new URLSearchParams(window.location.search).get('mode') || 'connect'
+  } catch { return 'connect' }
 }
 
-function isValidAlgorandAddress(addr) {
-  if (!addr || typeof addr !== 'string' || addr.length !== 58) return false
-  try {
-    algosdk.decodeAddress(addr)
-    return true
-  } catch {
-    return false
-  }
+function isValidAlgoAddress(addr) {
+  if (!addr || addr.length !== 58) return false
+  try { algosdk.decodeAddress(addr); return true } catch { return false }
 }
 
+// ─── Error Boundary ──────────────────────────────────────────────
 class ErrorBoundary extends Component {
   constructor(props) {
     super(props)
-    this.state = { hasError: false, error: null }
+    this.state = { error: null }
   }
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error }
-  }
-  componentDidCatch(error, info) {
-    console.error('ErrorBoundary caught:', error, info)
-  }
+  static getDerivedStateFromError(error) { return { error } }
+  componentDidCatch(err, info) { log(`ErrorBoundary caught: ${err.message}`) }
   render() {
-    if (this.state.hasError) {
-      return this.props.fallback || (
-        <div style={{ minHeight: '100vh', background: '#0D1117', color: '#E6EDF3', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, fontFamily: '-apple-system, sans-serif' }}>
-          <div style={{ maxWidth: 400, textAlign: 'center' }}>
+    if (this.state.error) {
+      return (
+        <div style={S.page}>
+          <div style={S.card}>
             <p style={{ fontSize: 40 }}>⚠️</p>
-            <p style={{ fontSize: 18, fontWeight: 700, marginTop: 12 }}>Something went wrong</p>
-            <p style={{ fontSize: 13, color: '#8B949E', marginTop: 8 }}>{String(this.state.error?.message || 'Unknown error')}</p>
-            <button onClick={() => window.location.reload()} style={{ marginTop: 20, padding: '10px 24px', background: '#238636', color: '#fff', border: 'none', borderRadius: 12, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>
-              Reload
-            </button>
+            <h2 style={{ margin: '12px 0 0' }}>React Render Error</h2>
+            <pre style={S.errorPre}>{this.state.error.message}{'\n\n'}{this.state.error.stack?.slice(0, 500)}</pre>
+            <button style={S.btn} onClick={() => location.reload()}>Reload</button>
           </div>
         </div>
       )
@@ -53,655 +68,272 @@ class ErrorBoundary extends Component {
   }
 }
 
-function ManualConnectFallback() {
+// ─── Connect Mode: paste address (always works) ─────────────────
+function ConnectMode() {
   const [address, setAddress] = useState('')
-  const [error, setError] = useState(null)
-  const [checking, setChecking] = useState(false)
-  const [success, setSuccess] = useState(false)
+  const [status, setStatus] = useState(null)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [balance, setBalance] = useState(null)
+  const sentRef = useRef(false)
 
-  useEffect(() => {
-    if (tg) { tg.ready(); tg.expand(); tg.MainButton.hide() }
-  }, [])
-
-  const handleSubmit = async () => {
-    const trimmed = address.trim()
-    setError(null)
-    if (!isValidAlgorandAddress(trimmed)) {
-      setError('Invalid Algorand address. Must be 58 characters.')
-      return
-    }
-    setChecking(true)
-    try {
-      const info = await algodClient.accountInformation(trimmed).do()
-      const bal = (info['amount'] || 0) / 1e6
-      setSuccess(true)
-      if (tg) {
-        setTimeout(() => {
-          tg.sendData(JSON.stringify({ action: 'wallet_connected', address: trimmed, balance: bal }))
-          tg.close()
-        }, 800)
-      }
-    } catch {
-      setError('Could not verify on TestNet. Check the address.')
-      setChecking(false)
-    }
-  }
+  log('ConnectMode rendered')
 
   const handlePaste = async () => {
     try {
       const text = await navigator.clipboard.readText()
       setAddress(text.trim())
-      setError(null)
-    } catch { setError('Clipboard access denied. Paste manually.') }
-  }
-
-  if (success) {
-    return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] p-4 flex items-center justify-center">
-        <div className="max-w-md w-full bg-[#161B22] rounded-2xl p-8 border border-green-900/50 text-center space-y-3">
-          <div className="text-5xl">✅</div>
-          <p className="text-xl font-bold text-green-400">Wallet Connected!</p>
-          <p className="text-sm text-[#8B949E]">Sending to X10V bot…</p>
-          <p className="text-xs font-mono break-all bg-black/30 rounded-lg p-3">{address.trim()}</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] p-4">
-      <div className="max-w-md mx-auto space-y-5">
-        <div className="text-center pt-2 pb-4 border-b border-gray-800">
-          <h1 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-cyan-400 bg-clip-text text-transparent">
-            X10V Wallet Connect
-          </h1>
-          <p className="text-[#8B949E] text-sm mt-1">Paste your Algorand address</p>
-        </div>
-        <div className="bg-[#161B22] rounded-xl p-5 border border-gray-800 space-y-4">
-          <div className="flex items-start gap-3 bg-yellow-950/30 border border-yellow-800/50 rounded-lg p-3">
-            <span className="text-lg">💡</span>
-            <div className="text-xs text-yellow-200/80 space-y-1">
-              <p>Open your <strong>Lute Wallet</strong> extension → copy your TestNet address → paste below</p>
-            </div>
-          </div>
-          <div>
-            <label className="text-xs text-[#8B949E] block mb-1.5">Algorand TestNet Address</label>
-            <div className="flex gap-2">
-              <input type="text" value={address}
-                onChange={(e) => { setAddress(e.target.value); setError(null) }}
-                placeholder="Paste your 58-char address…"
-                className="flex-1 bg-black/30 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono focus:outline-none focus:border-[#58A6FF] placeholder:text-gray-600"
-                spellCheck={false} autoComplete="off" />
-              <button onClick={handlePaste}
-                className="px-3 py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-xs font-medium border border-gray-700">
-                📋
-              </button>
-            </div>
-            {address && (
-              <p className={`text-xs mt-1.5 ${isValidAlgorandAddress(address.trim()) ? 'text-green-400' : 'text-[#8B949E]'}`}>
-                {address.trim().length}/58 {isValidAlgorandAddress(address.trim()) && '✓ Valid'}
-              </p>
-            )}
-          </div>
-          {error && <div className="bg-red-950/30 border border-red-800 rounded-lg p-3"><p className="text-xs text-red-400">{error}</p></div>}
-          <button onClick={handleSubmit} disabled={!address.trim() || checking}
-            className="w-full py-3 px-4 bg-gradient-to-r from-green-600 to-emerald-600 text-white font-semibold rounded-xl hover:from-green-500 hover:to-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.98] transition-all">
-            {checking ? '⏳ Verifying…' : '🔗 Connect Wallet'}
-          </button>
-        </div>
-        <div className="bg-[#161B22] rounded-xl p-4 border border-gray-800">
-          <h3 className="text-sm font-semibold text-[#8B949E] mb-2">ℹ️ Setup</h3>
-          <ul className="text-xs text-[#8B949E] space-y-1.5">
-            <li>• Install <a href="https://lute.app" className="text-[#58A6FF] underline" target="_blank" rel="noreferrer">Lute Wallet</a> Chrome extension</li>
-            <li>• Switch to <strong>Algorand TestNet</strong></li>
-            <li>• Fund via <a href="https://bank.testnet.algorand.network/" className="text-[#58A6FF] underline" target="_blank" rel="noreferrer">TestNet Dispenser</a></li>
-          </ul>
-        </div>
-        <div className="text-center">
-          <span className="inline-flex items-center gap-1.5 text-xs text-[#8B949E] bg-[#161B22] px-3 py-1 rounded-full border border-gray-800">
-            <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" /> TestNet
-          </span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function WalletConnectMode() {
-  const [walletLib, setWalletLib] = useState(null)
-  const [loadError, setLoadError] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    async function loadWallet() {
-      try {
-        const mod = await import('@txnlab/use-wallet-react')
-        if (!cancelled) setWalletLib(mod)
-      } catch (err) {
-        console.error('Failed to load wallet library:', err)
-        if (!cancelled) setLoadError(true)
-      }
+      setErrorMsg('')
+      log('Pasted from clipboard')
+    } catch (e) {
+      setErrorMsg('Clipboard access denied. Please paste manually.')
+      log(`Clipboard error: ${e.message}`)
     }
-    loadWallet()
-    return () => { cancelled = true }
-  }, [])
-
-  if (loadError) return <ManualConnectFallback />
-
-  if (!walletLib) {
-    return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <div className="text-3xl animate-pulse">🔗</div>
-          <p className="text-sm text-[#8B949E]">Initializing wallet…</p>
-        </div>
-      </div>
-    )
   }
 
-  return (
-    <ErrorBoundary fallback={<ManualConnectFallback />}>
-      <WalletConnectInner walletLib={walletLib} />
-    </ErrorBoundary>
-  )
-}
+  const handleSubmit = async () => {
+    const trimmed = address.trim()
+    log(`Submit: ${trimmed.slice(0, 10)}... (${trimmed.length} chars)`)
 
-function WalletConnectInner({ walletLib }) {
-  const { WalletProvider, WalletManager, WalletId, NetworkId } = walletLib
-  const [manager, setManager] = useState(null)
-  const [initFailed, setInitFailed] = useState(false)
+    if (!isValidAlgoAddress(trimmed)) {
+      setErrorMsg('Invalid Algorand address (must be 58 characters, base32).')
+      setStatus('error')
+      return
+    }
+    if (!algodClient) {
+      setErrorMsg('Algorand client not available. Please reload.')
+      setStatus('error')
+      return
+    }
 
-  useEffect(() => {
+    setStatus('checking')
+    setErrorMsg('')
+
     try {
-      const wm = new WalletManager({
-        wallets: [WalletId.LUTE],
-        network: NetworkId.TESTNET,
-        algod: { baseServer: 'https://testnet-api.algonode.cloud', port: 443, token: '' },
-      })
-      setManager(wm)
-    } catch (err) {
-      console.error('WalletManager init failed:', err)
-      setInitFailed(true)
-    }
-  }, [])
-
-  if (initFailed) return <ManualConnectFallback />
-
-  if (!manager) {
-    return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <div className="text-3xl animate-pulse">🔗</div>
-          <p className="text-sm text-[#8B949E]">Loading Lute wallet…</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <WalletProvider manager={manager}>
-      <ConnectModeUI />
-    </WalletProvider>
-  )
-}
-
-function ConnectModeUI() {
-  const [hookMod, setHookMod] = useState(null)
-
-  useEffect(() => {
-    import('@txnlab/use-wallet-react').then(m => setHookMod(m))
-  }, [])
-
-  if (!hookMod) return null
-
-  return <ConnectModeUIInner useWallet={hookMod.useWallet} />
-}
-
-function ConnectModeUIInner({ useWallet }) {
-  const { wallets, activeAccount } = useWallet()
-  const [error, setError] = useState(null)
-  const [success, setSuccess] = useState(false)
-  const [balance, setBalance] = useState(null)
-  const [showManual, setShowManual] = useState(false)
-  const [manualAddress, setManualAddress] = useState('')
-  const [checking, setChecking] = useState(false)
-  const dataSentRef = useRef(false)
-
-  useEffect(() => {
-    if (tg) { tg.ready(); tg.expand(); tg.MainButton.hide() }
-  }, [])
-
-  useEffect(() => {
-    if (activeAccount?.address && !dataSentRef.current) {
-      dataSentRef.current = true
-      setSuccess(true)
-      getAccountBalance(activeAccount.address).then(bal => {
-        setBalance(bal)
-        if (tg) {
-          setTimeout(() => {
-            tg.sendData(JSON.stringify({ action: 'wallet_connected', address: activeAccount.address, balance: bal || 0 }))
-            tg.close()
-          }, 800)
-        }
-      })
-    }
-  }, [activeAccount])
-
-  const handleConnect = async (wallet) => {
-    try { setError(null); await wallet.connect() }
-    catch (err) { setError(`Connection failed: ${err.message}`) }
-  }
-
-  const handleManualSubmit = async () => {
-    const trimmed = manualAddress.trim()
-    setError(null)
-    if (!isValidAlgorandAddress(trimmed)) { setError('Invalid address. Must be 58 characters.'); return }
-    setChecking(true)
-    try {
+      log('Verifying on TestNet...')
       const info = await algodClient.accountInformation(trimmed).do()
       const bal = (info['amount'] || 0) / 1e6
-      setSuccess(true); setBalance(bal)
-      if (tg) { setTimeout(() => { tg.sendData(JSON.stringify({ action: 'wallet_connected', address: trimmed, balance: bal })); tg.close() }, 800) }
-    } catch { setError('Could not verify on TestNet.'); setChecking(false) }
+      setBalance(bal)
+      setStatus('success')
+      log(`Verified! Balance: ${bal} ALGO`)
+
+      if (tg && !sentRef.current) {
+        sentRef.current = true
+        setTimeout(() => {
+          const data = JSON.stringify({ action: 'wallet_connected', address: trimmed, balance: bal })
+          log(`sendData: ${data}`)
+          tg.sendData(data)
+          tg.close()
+        }, 1000)
+      }
+    } catch (e) {
+      log(`Verification failed: ${e.message}`)
+      setErrorMsg(`Could not verify on TestNet: ${e.message}`)
+      setStatus('error')
+    }
   }
 
-  const handlePaste = async () => {
-    try { const t = await navigator.clipboard.readText(); setManualAddress(t.trim()); setError(null) }
-    catch { setError('Clipboard denied. Paste manually.') }
-  }
-
-  const luteWallet = wallets?.find(w => w.id === 'lute')
-
-  if (success) {
+  if (status === 'success') {
     return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] p-4 flex items-center justify-center">
-        <div className="max-w-md w-full bg-[#161B22] rounded-2xl p-8 border border-green-900/50 text-center space-y-3">
-          <div className="text-5xl">✅</div>
-          <p className="text-xl font-bold text-green-400">Wallet Connected!</p>
-          <p className="text-sm text-[#8B949E]">Sending to X10V bot…</p>
-          <p className="text-xs font-mono break-all bg-black/30 rounded-lg p-3">{activeAccount?.address || manualAddress.trim()}</p>
-          {balance !== null && <p className="text-sm text-green-400">{balance.toFixed(4)} ALGO</p>}
+      <div style={S.page}>
+        <div style={{ ...S.card, borderColor: '#238636' }}>
+          <p style={{ fontSize: 48 }}>✅</p>
+          <h2 style={{ color: '#3FB950', margin: '8px 0' }}>Wallet Connected!</h2>
+          <p style={{ fontSize: 13, color: '#8B949E' }}>Sending to X10V bot…</p>
+          <p style={S.mono}>{address.trim()}</p>
+          {balance !== null && <p style={{ color: '#3FB950', fontWeight: 700, marginTop: 8 }}>{balance.toFixed(4)} ALGO</p>}
         </div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] p-4">
-      <div className="max-w-md mx-auto space-y-5">
-        <div className="text-center pt-2 pb-4 border-b border-gray-800">
-          <h1 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-cyan-400 bg-clip-text text-transparent">
+    <div style={S.page}>
+      <div style={{ maxWidth: 420, width: '100%' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', padding: '12px 0 20px', borderBottom: '1px solid #21262D' }}>
+          <h1 style={{ fontSize: 22, fontWeight: 800, background: 'linear-gradient(90deg,#3FB950,#58A6FF)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', margin: 0 }}>
             X10V Wallet Connect
           </h1>
-          <p className="text-[#8B949E] text-sm mt-1">Link your Algorand Lute Wallet</p>
+          <p style={{ fontSize: 13, color: '#8B949E', marginTop: 6 }}>Link your Algorand TestNet wallet</p>
         </div>
 
-        <div className="bg-[#161B22] rounded-xl p-5 border border-gray-800 space-y-4">
-          <h2 className="text-lg font-semibold">🔗 Connect with Lute</h2>
-          <p className="text-[#8B949E] text-sm">Click below to open the Lute Wallet extension and sign in.</p>
-          {luteWallet ? (
-            <button onClick={() => handleConnect(luteWallet)}
-              className="w-full py-3 px-4 bg-gradient-to-r from-green-600 to-emerald-600 text-white font-semibold rounded-xl hover:from-green-500 hover:to-emerald-500 active:scale-[0.98] transition-all">
-              🔗 Connect Lute Wallet
+        {/* Instructions */}
+        <div style={{ ...S.card, margin: '20px 0 16px', borderColor: '#634C1A' }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            <span style={{ fontSize: 20 }}>💡</span>
+            <div style={{ fontSize: 12, color: '#D4A72C', lineHeight: 1.7 }}>
+              <strong>How to connect:</strong><br />
+              1. Open your <strong>Lute Wallet</strong> Chrome extension<br />
+              2. Switch to <strong>TestNet</strong> in Lute settings<br />
+              3. Copy your address from Lute<br />
+              4. Paste it below and tap <strong>Connect</strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Input card */}
+        <div style={S.card}>
+          <label style={{ fontSize: 12, color: '#8B949E', display: 'block', marginBottom: 6 }}>Algorand TestNet Address</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              value={address}
+              onChange={(e) => { setAddress(e.target.value); setErrorMsg(''); setStatus(null) }}
+              placeholder="Paste your 58-character address…"
+              spellCheck="false"
+              autoComplete="off"
+              style={{
+                flex: 1, background: 'rgba(0,0,0,0.3)', border: '1px solid #30363D', borderRadius: 8,
+                padding: '10px 12px', color: '#E6EDF3', fontSize: 13, fontFamily: 'monospace', outline: 'none',
+              }}
+            />
+            <button onClick={handlePaste} style={{ ...S.btn, background: '#21262D', padding: '10px 14px', fontSize: 16 }}>
+              📋
             </button>
-          ) : (
-            <div className="space-y-2">
-              {wallets?.map(w => (
-                <button key={w.id} onClick={() => handleConnect(w)}
-                  className="w-full py-3 px-4 bg-gradient-to-r from-green-600 to-emerald-600 text-white font-semibold rounded-xl hover:from-green-500 hover:to-emerald-500 active:scale-[0.98] transition-all">
-                  🔗 Connect {w.metadata?.name || w.id}
-                </button>
-              ))}
+          </div>
+
+          {address && (
+            <p style={{ fontSize: 11, marginTop: 6, color: isValidAlgoAddress(address.trim()) ? '#3FB950' : '#8B949E' }}>
+              {address.trim().length}/58 characters {isValidAlgoAddress(address.trim()) && '✓ Valid format'}
+            </p>
+          )}
+
+          {errorMsg && (
+            <div style={{ marginTop: 10, background: 'rgba(248,81,73,0.1)', border: '1px solid #F85149', borderRadius: 8, padding: 10 }}>
+              <p style={{ fontSize: 12, color: '#F85149', margin: 0 }}>{errorMsg}</p>
             </div>
           )}
-          {error && <div className="bg-red-950/30 border border-red-800 rounded-lg p-3"><p className="text-xs text-red-400">{error}</p></div>}
-        </div>
 
-        <div className="bg-[#161B22] rounded-xl p-5 border border-gray-800 space-y-4">
-          <button onClick={() => setShowManual(!showManual)}
-            className="w-full flex items-center justify-between text-sm text-[#8B949E] hover:text-[#E6EDF3] transition-colors">
-            <span>📋 Paste address manually</span>
-            <span className="text-xs">{showManual ? '▲' : '▼'}</span>
+          <button
+            onClick={handleSubmit}
+            disabled={!address.trim() || status === 'checking'}
+            style={{
+              ...S.btn,
+              width: '100%', marginTop: 14, padding: '12px 0', fontSize: 15,
+              background: (!address.trim() || status === 'checking') ? '#21262D' : 'linear-gradient(90deg,#238636,#2EA043)',
+              cursor: (!address.trim() || status === 'checking') ? 'not-allowed' : 'pointer',
+              opacity: (!address.trim() || status === 'checking') ? 0.5 : 1,
+            }}
+          >
+            {status === 'checking' ? '⏳ Verifying on TestNet…' : '🔗 Connect Wallet'}
           </button>
-          {showManual && (
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-[#8B949E] block mb-1.5">TestNet Address</label>
-                <div className="flex gap-2">
-                  <input type="text" value={manualAddress}
-                    onChange={(e) => { setManualAddress(e.target.value); setError(null) }}
-                    placeholder="58-character address…"
-                    className="flex-1 bg-black/30 border border-gray-700 rounded-lg px-3 py-2.5 text-sm font-mono focus:outline-none focus:border-[#58A6FF] placeholder:text-gray-600"
-                    spellCheck={false} autoComplete="off" />
-                  <button onClick={handlePaste}
-                    className="px-3 py-2.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-xs border border-gray-700">📋</button>
-                </div>
-                {manualAddress && <p className={`text-xs mt-1.5 ${isValidAlgorandAddress(manualAddress.trim()) ? 'text-green-400' : 'text-[#8B949E]'}`}>{manualAddress.trim().length}/58 {isValidAlgorandAddress(manualAddress.trim()) && '✓'}</p>}
-              </div>
-              <button onClick={handleManualSubmit} disabled={!manualAddress.trim() || checking}
-                className="w-full py-3 px-4 bg-gradient-to-r from-blue-600 to-cyan-600 text-white font-semibold rounded-xl disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.98] transition-all">
-                {checking ? '⏳ Verifying…' : '🔗 Connect with Address'}
-              </button>
-            </div>
-          )}
         </div>
 
-        <div className="bg-[#161B22] rounded-xl p-4 border border-gray-800">
-          <h3 className="text-sm font-semibold text-[#8B949E] mb-2">ℹ️ Setup</h3>
-          <ul className="text-xs text-[#8B949E] space-y-1.5">
-            <li>• Install <a href="https://lute.app" className="text-[#58A6FF] underline" target="_blank" rel="noreferrer">Lute Wallet</a> Chrome extension</li>
-            <li>• Switch to <strong>Algorand TestNet</strong></li>
-            <li>• Fund via <a href="https://bank.testnet.algorand.network/" className="text-[#58A6FF] underline" target="_blank" rel="noreferrer">TestNet Dispenser</a></li>
+        {/* Setup guide */}
+        <div style={{ ...S.card, marginTop: 16 }}>
+          <h3 style={{ fontSize: 13, color: '#8B949E', margin: '0 0 8px', fontWeight: 600 }}>ℹ️ Setup Guide</h3>
+          <ul style={{ fontSize: 12, color: '#8B949E', margin: 0, paddingLeft: 16, lineHeight: 2.2 }}>
+            <li>Install <a href="https://lute.app" style={{ color: '#58A6FF' }} target="_blank" rel="noreferrer">Lute Wallet</a> Chrome extension</li>
+            <li>Switch to <strong>Algorand TestNet</strong> in Lute settings</li>
+            <li>Fund via <a href="https://bank.testnet.algorand.network/" style={{ color: '#58A6FF' }} target="_blank" rel="noreferrer">TestNet Dispenser</a></li>
           </ul>
         </div>
 
-        <div className="text-center">
-          <span className="inline-flex items-center gap-1.5 text-xs text-[#8B949E] bg-[#161B22] px-3 py-1 rounded-full border border-gray-800">
-            <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" /> Algorand TestNet
+        {/* Network badge */}
+        <div style={{ textAlign: 'center', marginTop: 20 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#8B949E', background: '#161B22', padding: '4px 12px', borderRadius: 20, border: '1px solid #21262D' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#D29922' }} />
+            Algorand TestNet
           </span>
         </div>
+
+        {/* Debug panel */}
+        <details style={{ marginTop: 24, fontSize: 11, color: '#484F58' }}>
+          <summary style={{ cursor: 'pointer' }}>🐛 Debug Info</summary>
+          <pre style={{ marginTop: 8, background: '#0D1117', border: '1px solid #21262D', borderRadius: 8, padding: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 10, color: '#8B949E' }}>
+{`Mode: ${getAppMode()}
+Telegram SDK: ${tg ? 'YES v' + (tg.version || '?') : 'NO'}
+algosdk: ${algosdk ? 'YES' : 'NO'}
+algodClient: ${algodClient ? 'YES' : 'NO'}
+URL: ${window.location.href}
+UA: ${navigator.userAgent.slice(0, 120)}
+Logs:
+${(window.__bootLogs || []).join('\n')}`}
+          </pre>
+        </details>
       </div>
     </div>
   )
 }
 
-function TransactModeWrapper() {
-  const [walletLib, setWalletLib] = useState(null)
-  const [loadError, setLoadError] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    import('@txnlab/use-wallet-react').then(mod => {
-      if (!cancelled) setWalletLib(mod)
-    }).catch(err => {
-      console.error('Failed to load wallet for transact:', err)
-      if (!cancelled) setLoadError(true)
-    })
-    return () => { cancelled = true }
-  }, [])
-
-  if (loadError) {
-    return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] flex items-center justify-center p-4">
-        <div className="text-center space-y-3">
-          <p className="text-3xl">⚠️</p>
-          <p className="text-sm text-[#8B949E]">Could not load wallet library. Please try in a direct browser tab.</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!walletLib) {
-    return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <div className="text-3xl animate-pulse">⚡</div>
-          <p className="text-sm text-[#8B949E]">Loading Web3 Bridge…</p>
-        </div>
-      </div>
-    )
-  }
-
-  return <TransactModeInit walletLib={walletLib} />
-}
-
-function TransactModeInit({ walletLib }) {
-  const { WalletProvider, WalletManager, WalletId, NetworkId } = walletLib
-  const [manager, setManager] = useState(null)
-
-  useEffect(() => {
-    try {
-      const wm = new WalletManager({
-        wallets: [WalletId.LUTE],
-        network: NetworkId.TESTNET,
-        algod: { baseServer: 'https://testnet-api.algonode.cloud', port: 443, token: '' },
-      })
-      setManager(wm)
-    } catch (err) {
-      console.error('WalletManager init failed for transact:', err)
-    }
-  }, [])
-
-  if (!manager) {
-    return (
-      <div className="min-h-screen bg-[#0D1117] text-[#E6EDF3] flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <div className="text-3xl animate-pulse">⚡</div>
-          <p className="text-sm text-[#8B949E]">Initializing…</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <WalletProvider manager={manager}>
-      <TransactModeUI useWallet={walletLib.useWallet} />
-    </WalletProvider>
-  )
-}
-
-function TransactModeUI({ useWallet }) {
-  const { wallets, activeWallet, activeAccount, signTransactions } = useWallet()
-  const [balance, setBalance] = useState(null)
-  const [txStatus, setTxStatus] = useState(null)
-  const [txId, setTxId] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [sendAmount, setSendAmount] = useState('0.1')
-
-  useEffect(() => {
-    if (tg) {
-      tg.ready()
-      tg.expand()
-      tg.MainButton.hide()
-    }
-  }, [])
-
-  useEffect(() => {
-    if (activeAccount?.address) {
-      refreshBalance()
-    } else {
-      setBalance(null)
-    }
-  }, [activeAccount])
-
-  const refreshBalance = useCallback(async () => {
-    if (!activeAccount?.address) return
-    const bal = await getAccountBalance(activeAccount.address)
-    setBalance(bal)
-  }, [activeAccount])
-
-  const handleConnect = async (wallet) => {
-    try {
-      setTxStatus(null)
-      await wallet.connect()
-    } catch (err) {
-      console.error('Connect failed:', err)
-      setTxStatus(`Connection failed: ${err.message}`)
-    }
-  }
-
-  const handleDisconnect = async () => {
-    if (activeWallet) {
-      await activeWallet.disconnect()
-      setBalance(null)
-      setTxStatus(null)
-      setTxId(null)
-    }
-  }
-
-  const handleSendAlgo = async () => {
-    if (!activeAccount?.address) return
-    const amount = parseFloat(sendAmount)
-    if (isNaN(amount) || amount <= 0) { setTxStatus('Invalid amount'); return }
-
-    setLoading(true)
-    setTxStatus('Building transaction …')
-    setTxId(null)
-
-    try {
-      const txn = await buildPaymentTxn(activeAccount.address, DUMMY_RECEIVER, amount)
-      const encodedTxn = algosdk.encodeUnsignedTransaction(txn)
-      setTxStatus('Waiting for Lute wallet signature …')
-      const signedTxns = await signTransactions([encodedTxn])
-      setTxStatus('Broadcasting to Algorand TestNet …')
-      const { txId: confirmedTxId } = await algodClient.sendRawTransaction(signedTxns[0]).do()
-      setTxId(confirmedTxId)
-      setTxStatus('Waiting for confirmation …')
-      await waitForConfirmation(confirmedTxId)
-      setTxStatus('✅ Transaction confirmed!')
-      await refreshBalance()
-
-      if (tg) {
-        tg.MainButton.setText('✅ Transaction Complete — Close')
-        tg.MainButton.show()
-        tg.MainButton.onClick(() => {
-          tg.sendData(JSON.stringify({ status: 'success', txId: confirmedTxId, amount, from: activeAccount.address, to: DUMMY_RECEIVER }))
-          tg.close()
-        })
-      }
-    } catch (err) {
-      console.error('Transaction failed:', err)
-      setTxStatus(`❌ Failed: ${err.message}`)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const luteWallet = wallets?.find(w => w.id === 'lute')
-
-  return (
-    <div className="min-h-screen bg-tg-bg text-tg-text p-4">
-      <div className="max-w-md mx-auto space-y-5">
-        <div className="text-center pt-2 pb-4 border-b border-gray-800">
-          <h1 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-cyan-400 bg-clip-text text-transparent">
-            X10V Web3 Bridge
-          </h1>
-          <p className="text-tg-hint text-sm mt-1">Algorand TestNet → Lute Wallet</p>
-        </div>
-
-        {!activeAccount ? (
-          <div className="fade-in space-y-3">
-            <div className="bg-tg-secondary rounded-xl p-5 border border-gray-800">
-              <h2 className="text-lg font-semibold mb-3">Connect Wallet</h2>
-              <p className="text-tg-hint text-sm mb-4">
-                Connect your Lute wallet to sign Algorand TestNet transactions.
-              </p>
-              {luteWallet ? (
-                <button
-                  onClick={() => handleConnect(luteWallet)}
-                  className="w-full py-3 px-4 bg-tg-button text-tg-buttonText font-semibold rounded-xl
-                             hover:opacity-90 active:scale-[0.98] transition-all duration-150"
-                >
-                  🔗 Connect Lute Wallet
-                </button>
-              ) : (
-                <div className="space-y-2">
-                  {wallets?.map(wallet => (
-                    <button
-                      key={wallet.id}
-                      onClick={() => handleConnect(wallet)}
-                      className="w-full py-3 px-4 bg-tg-button text-tg-buttonText font-semibold rounded-xl
-                                 hover:opacity-90 active:scale-[0.98] transition-all"
-                    >
-                      🔗 Connect {wallet.metadata?.name || wallet.id}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <div className="bg-tg-secondary rounded-xl p-4 border border-gray-800">
-              <h3 className="text-sm font-semibold text-tg-hint mb-2">ℹ️ Setup</h3>
-              <ul className="text-xs text-tg-hint space-y-1">
-                <li>• Install <a href="https://lute.app" className="text-tg-link underline" target="_blank" rel="noreferrer">Lute Wallet</a> browser extension</li>
-                <li>• Switch to Algorand TestNet in Lute settings</li>
-                <li>• Fund via <a href="https://bank.testnet.algorand.network/" className="text-tg-link underline" target="_blank" rel="noreferrer">Algorand Testnet Dispenser</a></li>
-              </ul>
-            </div>
-          </div>
-        ) : (
-          <div className="fade-in space-y-4">
-            <div className="bg-tg-secondary rounded-xl p-4 border border-green-900/50">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-sm font-semibold text-green-400">✅ Wallet Connected</span>
-                <button onClick={handleDisconnect} className="text-xs text-red-400 hover:text-red-300 transition-colors">
-                  Disconnect
-                </button>
-              </div>
-              <div className="space-y-2">
-                <div>
-                  <span className="text-xs text-tg-hint">Address</span>
-                  <p className="text-sm font-mono break-all bg-black/30 rounded-lg p-2 mt-1">{activeAccount.address}</p>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-tg-hint">TestNet Balance</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-lg font-bold text-green-400">
-                      {balance !== null ? `${balance.toFixed(4)} ALGO` : '…'}
-                    </span>
-                    <button onClick={refreshBalance} className="text-xs text-tg-link hover:underline">↻</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-tg-secondary rounded-xl p-4 border border-gray-800">
-              <h2 className="text-lg font-semibold mb-3">Send ALGO</h2>
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs text-tg-hint block mb-1">Amount (ALGO)</label>
-                  <input type="number" step="0.01" min="0.001" value={sendAmount}
-                    onChange={(e) => setSendAmount(e.target.value)}
-                    className="w-full bg-black/30 border border-gray-700 rounded-lg px-3 py-2 text-sm
-                               focus:outline-none focus:border-tg-link transition-colors" />
-                </div>
-                <div>
-                  <label className="text-xs text-tg-hint block mb-1">Recipient (TestNet)</label>
-                  <p className="text-xs font-mono break-all bg-black/20 rounded-lg p-2 text-tg-hint">{DUMMY_RECEIVER}</p>
-                </div>
-                <button onClick={handleSendAlgo}
-                  disabled={loading || balance === null || balance < parseFloat(sendAmount || '0') + 0.001}
-                  className="w-full py-3 px-4 bg-gradient-to-r from-green-600 to-emerald-600
-                             text-white font-semibold rounded-xl hover:from-green-500 hover:to-emerald-500
-                             disabled:opacity-40 disabled:cursor-not-allowed active:scale-[0.98] transition-all duration-150">
-                  {loading ? '⏳ Processing …' : `⚡ Send ${sendAmount} ALGO`}
-                </button>
-              </div>
-            </div>
-
-            {txStatus && (
-              <div className={`fade-in rounded-xl p-4 border ${
-                txStatus.includes('✅') ? 'bg-green-950/30 border-green-800' :
-                txStatus.includes('❌') ? 'bg-red-950/30 border-red-800' :
-                'bg-tg-secondary border-gray-800'}`}>
-                <p className="text-sm">{txStatus}</p>
-                {txId && (
-                  <a href={`https://testnet.explorer.perawallet.app/tx/${txId}`} target="_blank" rel="noopener noreferrer"
-                    className="text-xs text-tg-link hover:underline mt-2 block">
-                    View on Explorer → {txId.slice(0, 12)}…
-                  </a>
-                )}
-              </div>
-            )}
-
-            <div className="text-center">
-              <span className="inline-flex items-center gap-1.5 text-xs text-tg-hint bg-tg-secondary px-3 py-1 rounded-full border border-gray-800">
-                <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" />
-                Algorand TestNet
-              </span>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
+// ─── Root App ────────────────────────────────────────────────────
 export default function App() {
-  const appMode = getAppMode()
+  const [ready, setReady] = useState(false)
+  const mode = getAppMode()
+
+  log(`App() render — mode="${mode}"`)
+
+  useEffect(() => {
+    log('App useEffect — mounted')
+    setReady(true)
+  }, [])
+
+  if (!ready) {
+    return (
+      <div style={S.page}>
+        <div style={{ textAlign: 'center' }}>
+          <p style={{ fontSize: 28 }}>🔗</p>
+          <p style={{ fontSize: 14, color: '#8B949E', marginTop: 8 }}>App is Loading…</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <ErrorBoundary>
-      {appMode === 'connect' ? <WalletConnectMode /> : <TransactModeWrapper />}
+      <ConnectMode />
     </ErrorBoundary>
   )
+}
+
+// ─── Inline Styles ───────────────────────────────────────────────
+const S = {
+  page: {
+    minHeight: '100vh',
+    background: '#0D1117',
+    color: '#E6EDF3',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    padding: 16,
+    flexDirection: 'column',
+  },
+  card: {
+    background: '#161B22',
+    border: '1px solid #21262D',
+    borderRadius: 12,
+    padding: 16,
+  },
+  btn: {
+    background: '#238636',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 10,
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontSize: 14,
+  },
+  mono: {
+    fontSize: 11,
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+    background: 'rgba(0,0,0,0.3)',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 8,
+  },
+  errorPre: {
+    fontSize: 11,
+    color: '#F85149',
+    background: '#161B22',
+    padding: 12,
+    borderRadius: 8,
+    maxWidth: '90vw',
+    overflow: 'auto',
+    textAlign: 'left',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+    marginTop: 12,
+  },
 }

@@ -5,6 +5,8 @@ import OmniInput from './OmniInput'
 import SwarmTerminal from './SwarmTerminal'
 import TaskQueue from './TaskQueue'
 import PiPAgent from './PiPAgent'
+import VoiceAssistant from './VoiceAssistant'
+import YouTubeResearch from './YouTubeResearch'
 
 const WS_URL = 'ws://localhost:8000/ws'
 const API_BASE = 'http://localhost:8000'
@@ -308,6 +310,25 @@ export default function Dashboard() {
     }
   }
 
+  const handleVoiceIntent = (intent) => {
+    if (!intent) return
+    const action = intent.suggested_action || intent.intent
+    addLog(`[VoiceAI] 🎤 Intent: ${intent.intent} — ${action}`, 'system')
+
+    // Route intent to appropriate action
+    if (intent.intent === 'analyze_stock' && intent.entities?.ticker) {
+      handleCommand(`Analyze ${intent.entities.ticker} ${intent.entities.timeframe || '1d'} chart`)
+    } else if (intent.intent === 'summarize_video' && intent.entities?.url) {
+      addLog(`[VoiceAI] 🎬 Redirecting to YouTube Research tab with URL`, 'system')
+    } else if (intent.intent === 'set_automation') {
+      addLog(`[VoiceAI] ⚙️ Automation signal sent to Telegram bridge`, 'success')
+    } else if (intent.intent === 'trade') {
+      addLog(`[VoiceAI] 💹 Trade intent forwarded to Telegram bridge`, 'success')
+    } else if (intent.intent === 'monitor') {
+      addLog(`[VoiceAI] 📡 Monitor request forwarded to Telegram bridge`, 'success')
+    }
+  }
+
   const commandCenter = (
     <div className="space-y-6">
       <OmniInput
@@ -407,6 +428,17 @@ export default function Dashboard() {
               />
             </motion.div>
 
+            {/* Voice AI + YouTube Research — side by side */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.22, ease: 'easeOut' }}
+              className="grid grid-cols-1 lg:grid-cols-2 gap-6"
+            >
+              <VoiceAssistant onIntentAction={handleVoiceIntent} />
+              <YouTubeResearch />
+            </motion.div>
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -449,7 +481,7 @@ export default function Dashboard() {
 
       <footer className="border-t border-charcoal/5 py-6 text-center">
         <p className="text-xs font-sans text-charcoal-muted tracking-wide">
-          X10V · Built with FastAPI, Playwright, APScheduler · Multi-Agent Swarm Consensus
+          X10V · Omni-Channel Autonomous Financial Agent · Voice AI + YouTube Research + Groww Mock + Telegram Bridge
         </p>
       </footer>
     </div>
