@@ -13,15 +13,34 @@ import {
   Lightbulb,
   BarChart3,
   Download,
+  BookOpen,
+  Sparkles,
+  Tag,
 } from 'lucide-react'
 
 const API_BASE = 'http://localhost:8000'
 
-const SENTIMENT_CONFIG = {
-  bullish: { color: 'text-terminal-green', bg: 'bg-green-500/10', border: 'border-green-500/30', icon: TrendingUp },
-  bearish: { color: 'text-terminal-red', bg: 'bg-red-500/10', border: 'border-red-500/30', icon: TrendingDown },
+const TONE_CONFIG = {
+  informative: { color: 'text-blue-500', bg: 'bg-blue-500/10', border: 'border-blue-500/30', icon: BookOpen },
+  educational: { color: 'text-indigo-500', bg: 'bg-indigo-500/10', border: 'border-indigo-500/30', icon: BookOpen },
+  analytical: { color: 'text-cyan-500', bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', icon: BarChart3 },
+  persuasive: { color: 'text-orange-500', bg: 'bg-orange-500/10', border: 'border-orange-500/30', icon: TrendingUp },
+  entertaining: { color: 'text-pink-500', bg: 'bg-pink-500/10', border: 'border-pink-500/30', icon: Sparkles },
+  inspirational: { color: 'text-terminal-green', bg: 'bg-green-500/10', border: 'border-green-500/30', icon: TrendingUp },
   neutral: { color: 'text-terminal-yellow', bg: 'bg-yellow-500/10', border: 'border-yellow-500/30', icon: Minus },
-  mixed: { color: 'text-purple-400', bg: 'bg-purple-500/10', border: 'border-purple-500/30', icon: BarChart3 },
+}
+
+const DOMAIN_COLORS = {
+  science: 'bg-purple-100 text-purple-700 border-purple-200',
+  technology: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+  finance: 'bg-green-100 text-green-700 border-green-200',
+  education: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+  history: 'bg-amber-100 text-amber-700 border-amber-200',
+  health: 'bg-rose-100 text-rose-700 border-rose-200',
+  entertainment: 'bg-pink-100 text-pink-700 border-pink-200',
+  philosophy: 'bg-violet-100 text-violet-700 border-violet-200',
+  engineering: 'bg-slate-100 text-slate-700 border-slate-200',
+  other: 'bg-gray-100 text-gray-700 border-gray-200',
 }
 
 export default function YouTubeResearch() {
@@ -112,9 +131,11 @@ export default function YouTubeResearch() {
   }
 
   const summary = result?.summary
-  const sentimentKey = summary?.sentiment?.toLowerCase() || 'neutral'
-  const sentimentStyle = SENTIMENT_CONFIG[sentimentKey] || SENTIMENT_CONFIG.neutral
-  const SentimentIcon = sentimentStyle.icon
+  const toneKey = summary?.tone?.toLowerCase() || 'neutral'
+  const toneStyle = TONE_CONFIG[toneKey] || TONE_CONFIG.neutral
+  const ToneIcon = toneStyle.icon
+  const domainKey = summary?.domain?.toLowerCase() || 'other'
+  const domainStyle = DOMAIN_COLORS[domainKey] || DOMAIN_COLORS.other
 
   return (
     <div>
@@ -124,7 +145,7 @@ export default function YouTubeResearch() {
           YouTube Deep Research
         </h2>
         <span className="text-xs font-sans text-charcoal-muted ml-1">
-          Transcript → Groq AI → Financial Summary
+          Transcript → Groq AI → Deep Research Summary
         </span>
       </div>
 
@@ -195,12 +216,16 @@ export default function YouTubeResearch() {
                     {summary.title_inferred || 'YouTube Research Summary'}
                   </h3>
                   <div className="flex items-center gap-3 mt-2">
+                    <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border ${domainStyle}`}>
+                      <Tag size={10} />
+                      {summary.domain?.charAt(0).toUpperCase() + summary.domain?.slice(1)}
+                    </span>
                     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium
-                                     ${sentimentStyle.color} ${sentimentStyle.bg} border ${sentimentStyle.border}`}>
-                      <SentimentIcon size={12} />
-                      {summary.sentiment?.toUpperCase()}
-                      {summary.sentiment_score != null && (
-                        <span className="ml-1 opacity-70">({(summary.sentiment_score * 100).toFixed(0)}%)</span>
+                                     ${toneStyle.color} ${toneStyle.bg} border ${toneStyle.border}`}>
+                      <ToneIcon size={12} />
+                      {summary.tone?.charAt(0).toUpperCase() + summary.tone?.slice(1)}
+                      {summary.complexity_score != null && (
+                        <span className="ml-1 opacity-70">({(summary.complexity_score * 100).toFixed(0)}% complex)</span>
                       )}
                     </span>
                     <span className="text-xs text-charcoal-muted">
@@ -264,40 +289,40 @@ export default function YouTubeResearch() {
                 </div>
               )}
 
-              {/* Two-column: Financial Insights + Risks */}
+              {/* Two-column: Deep Insights + Caveats */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {summary.financial_insights?.length > 0 && (
-                  <div className="rounded-lg bg-green-50/50 border border-green-200/50 p-3">
-                    <h4 className="text-xs font-sans text-green-700/70 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                {summary.deep_insights?.length > 0 && (
+                  <div className="rounded-lg bg-emerald-50/50 border border-emerald-200/50 p-3">
+                    <h4 className="text-xs font-sans text-emerald-700/70 uppercase tracking-wider mb-2 flex items-center gap-1.5">
                       <Lightbulb size={12} />
-                      Financial Insights
+                      Deep Insights
                     </h4>
-                    {summary.financial_insights.map((insight, i) => (
-                      <p key={i} className="text-xs text-green-800/80 mb-1">💡 {insight}</p>
+                    {summary.deep_insights.map((insight, i) => (
+                      <p key={i} className="text-xs text-emerald-800/80 mb-1">💡 {insight}</p>
                     ))}
                   </div>
                 )}
 
-                {summary.risk_factors?.length > 0 && (
-                  <div className="rounded-lg bg-red-50/50 border border-red-200/50 p-3">
-                    <h4 className="text-xs font-sans text-red-700/70 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                {summary.important_warnings?.length > 0 && (
+                  <div className="rounded-lg bg-amber-50/50 border border-amber-200/50 p-3">
+                    <h4 className="text-xs font-sans text-amber-700/70 uppercase tracking-wider mb-2 flex items-center gap-1.5">
                       <AlertTriangle size={12} />
-                      Risk Factors
+                      Caveats & Limitations
                     </h4>
-                    {summary.risk_factors.map((risk, i) => (
-                      <p key={i} className="text-xs text-red-800/80 mb-1">⚠️ {risk}</p>
+                    {summary.important_warnings.map((warning, i) => (
+                      <p key={i} className="text-xs text-amber-800/80 mb-1">⚠️ {warning}</p>
                     ))}
                   </div>
                 )}
               </div>
 
-              {/* Mentioned Assets */}
-              {summary.mentioned_assets?.length > 0 && (
+              {/* Key Topics */}
+              {summary.mentioned_topics?.length > 0 && (
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs text-charcoal-muted/60">Assets:</span>
-                  {summary.mentioned_assets.map((asset, i) => (
+                  <span className="text-xs text-charcoal-muted/60">Topics:</span>
+                  {summary.mentioned_topics.map((topic, i) => (
                     <span key={i} className="px-2 py-0.5 rounded-md bg-charcoal/5 border border-charcoal/8 text-xs font-mono font-semibold text-charcoal">
-                      {asset}
+                      {topic}
                     </span>
                   ))}
                 </div>
@@ -338,10 +363,10 @@ export default function YouTubeResearch() {
           <div className="p-6 text-center">
             <Youtube size={32} className="mx-auto text-charcoal-muted/20 mb-2" />
             <p className="text-sm text-charcoal-muted/50">
-              Paste a YouTube URL to get an AI-powered financial research summary
+              Paste any YouTube URL to get an AI-powered deep research summary
             </p>
             <p className="text-xs text-charcoal-muted/30 mt-1">
-              Transcript extraction → Groq Llama-3.1-8b → Structured analysis → JSON / Markdown / PDF export
+              Transcript extraction → Groq Llama-3.1-8b → Domain-adaptive analysis → JSON / Markdown / PDF export
             </p>
           </div>
         )}

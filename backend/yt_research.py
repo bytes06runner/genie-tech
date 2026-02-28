@@ -2,11 +2,11 @@
 yt_research.py — YouTube Deep-Research Summarizer
 ====================================================
 Extracts transcripts from YouTube videos and uses Groq to generate
-comprehensive financial summaries with export to JSON, Markdown, and PDF.
+comprehensive, domain-adaptive research summaries with export to JSON, Markdown, and PDF.
 
 Pipeline:
   1. Extract video metadata + transcript via youtube-transcript-api
-  2. Pass to Groq Llama-3.1-8b for rapid financial summarisation
+  2. Pass to Groq Llama-3.1-8b for rapid domain-aware summarisation
   3. Return structured JSON with export-ready formats
 """
 
@@ -78,13 +78,20 @@ async def get_transcript(video_id: str) -> dict:
 
 async def summarize_transcript(transcript_text: str, video_id: str) -> dict:
     """
-    Use Groq Llama-3.1-8b to generate a comprehensive financial summary.
-    Returns structured JSON with summary, key_points, sentiment, etc.
+    Use Groq Llama-3.1-8b to generate a comprehensive, domain-adaptive summary.
+    Automatically detects whether the video is about science, finance, tech, history, etc.
+    Returns structured JSON with domain-relevant fields.
     """
     import asyncio
 
-    prompt = f"""You are an elite financial research analyst. Analyze the following YouTube video transcript 
-and produce a comprehensive research summary.
+    prompt = f"""You are an elite research analyst with expertise across ALL domains — science, technology, 
+finance, history, philosophy, education, engineering, medicine, entertainment, and more.
+
+Analyze the following YouTube video transcript and produce a comprehensive, domain-appropriate research summary.
+
+CRITICAL: Detect the actual topic/domain of the video from the transcript content. 
+Do NOT force financial framing onto non-financial content. A video about black holes should 
+have physics insights, not stock market analogies. A cooking video should have culinary takeaways, not trading advice.
 
 VIDEO ID: {video_id}
 TRANSCRIPT:
@@ -93,18 +100,25 @@ TRANSCRIPT:
 Respond in this EXACT JSON format:
 {{
     "title_inferred": "Best guess at the video title based on content",
-    "summary": "2-3 paragraph comprehensive summary of the video content",
+    "domain": "science | technology | finance | education | history | health | entertainment | philosophy | engineering | other",
+    "summary": "2-3 paragraph comprehensive summary capturing the core message and key arguments",
     "key_points": ["point 1", "point 2", "point 3", "point 4", "point 5"],
-    "financial_insights": ["insight 1", "insight 2", "insight 3"],
-    "mentioned_assets": ["AAPL", "BTC", etc.],
-    "sentiment": "bullish | bearish | neutral | mixed",
-    "sentiment_score": 0.0 to 1.0,
-    "risk_factors": ["risk 1", "risk 2"],
-    "actionable_takeaways": ["action 1", "action 2", "action 3"],
-    "content_type": "market_analysis | tutorial | news | interview | other"
+    "deep_insights": ["domain-relevant insight 1", "insight 2", "insight 3"],
+    "mentioned_topics": ["topic1", "topic2", "topic3"],
+    "tone": "informative | persuasive | educational | entertaining | analytical | inspirational | neutral",
+    "complexity_score": 0.0 to 1.0,
+    "important_warnings": ["caveat or limitation 1", "caveat 2"],
+    "actionable_takeaways": ["what the viewer should do/learn/remember 1", "takeaway 2", "takeaway 3"],
+    "content_type": "explainer | tutorial | analysis | documentary | lecture | interview | review | news | vlog | other"
 }}
 
-Be thorough, specific, and cite data points from the transcript. Respond ONLY with valid JSON."""
+RULES:
+- "deep_insights" must be relevant to the ACTUAL domain (physics insights for physics, code insights for programming, etc.)
+- "mentioned_topics" should list specific concepts, people, theories, tools, or subjects discussed
+- "important_warnings" should note any limitations, controversies, or caveats mentioned or implied
+- "actionable_takeaways" should be practical: what should the viewer learn, explore, or do after watching
+- Be thorough, specific, and cite data points from the transcript
+- Respond ONLY with valid JSON"""
 
     def _call_groq():
         response = groq_client.chat.completions.create(
@@ -125,9 +139,9 @@ Be thorough, specific, and cite data points from the transcript. Respond ONLY wi
         if json_start >= 0 and json_end > json_start:
             parsed = json.loads(raw[json_start:json_end])
         else:
-            parsed = {"summary": raw, "key_points": [], "sentiment": "neutral"}
+            parsed = {"summary": raw, "key_points": [], "tone": "neutral", "domain": "other"}
     except json.JSONDecodeError:
-        parsed = {"summary": raw, "key_points": [], "sentiment": "neutral"}
+        parsed = {"summary": raw, "key_points": [], "tone": "neutral", "domain": "other"}
 
     parsed["video_url"] = f"https://youtube.com/watch?v={video_id}"
     parsed["analyzed_at"] = datetime.now(timezone.utc).isoformat()
@@ -137,13 +151,21 @@ Be thorough, specific, and cite data points from the transcript. Respond ONLY wi
 
 
 def generate_markdown(summary_data: dict) -> str:
-    """Convert summary JSON to a formatted Markdown document."""
+    """Convert summary JSON to a formatted Markdown document — domain-adaptive."""
     title = summary_data.get("title_inferred", "YouTube Research Summary")
-    md = f"""# 📊 {title}
+    domain = summary_data.get("domain", "general").capitalize()
+    tone = summary_data.get("tone", "neutral").capitalize()
+    complexity = summary_data.get("complexity_score", "N/A")
+    if isinstance(complexity, (int, float)):
+        complexity = f"{complexity:.0%}"
+
+    md = f"""# � {title}
 
 **Source:** [{summary_data.get('video_url', 'N/A')}]({summary_data.get('video_url', '#')})
 **Analyzed:** {summary_data.get('analyzed_at', 'N/A')}
-**Sentiment:** {summary_data.get('sentiment', 'N/A').upper()} (Score: {summary_data.get('sentiment_score', 'N/A')})
+**Domain:** {domain}
+**Tone:** {tone}
+**Complexity:** {complexity}
 **Content Type:** {summary_data.get('content_type', 'N/A')}
 
 ---
@@ -158,23 +180,25 @@ def generate_markdown(summary_data: dict) -> str:
     for i, point in enumerate(summary_data.get("key_points", []), 1):
         md += f"{i}. {point}\n"
 
-    md += "\n## Financial Insights\n\n"
-    for insight in summary_data.get("financial_insights", []):
+    md += "\n## Deep Insights\n\n"
+    for insight in summary_data.get("deep_insights", []):
         md += f"- 💡 {insight}\n"
 
-    assets = summary_data.get("mentioned_assets", [])
-    if assets:
-        md += f"\n## Mentioned Assets\n\n`{'`, `'.join(assets)}`\n"
+    topics = summary_data.get("mentioned_topics", [])
+    if topics:
+        md += f"\n## Key Topics\n\n`{'`, `'.join(topics)}`\n"
 
-    md += "\n## Risk Factors\n\n"
-    for risk in summary_data.get("risk_factors", []):
-        md += f"- ⚠️ {risk}\n"
+    warnings = summary_data.get("important_warnings", [])
+    if warnings:
+        md += "\n## Important Caveats & Limitations\n\n"
+        for w in warnings:
+            md += f"- ⚠️ {w}\n"
 
     md += "\n## Actionable Takeaways\n\n"
     for action in summary_data.get("actionable_takeaways", []):
         md += f"- ✅ {action}\n"
 
-    md += f"\n---\n*Generated by X10V AI Swarm — Omni-Channel Autonomous Financial Agent*\n"
+    md += f"\n---\n*Generated by X10V AI Swarm — Omni-Channel Autonomous Intelligence Agent*\n"
     return md
 
 
