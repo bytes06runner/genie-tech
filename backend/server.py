@@ -21,7 +21,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from memory_manager import get_relevant_context, log_memory
+from memory_manager import log_memory
 from swarm_brain import run_swarm, extract_vision_context
 from scheduler_node import (
     register_task,

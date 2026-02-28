@@ -45,6 +45,7 @@ export default function Dashboard() {
       else if (msg.includes('[Gamma') && msg.includes('|cyan')) type = 'gamma-inform'
       else if (msg.includes('[Gamma') && msg.includes('|yellow')) type = 'gamma-research'
       else if (msg.includes('[Gamma')) type = 'gamma-execute'
+      else if (msg.includes('[DeepScraper]')) type = 'scraper'
       else if (msg.includes('[RAG]')) type = 'rag'
       else if (msg.includes('[Scheduler|red') || msg.includes('[Scheduler] ❌')) type = 'error'
       else if (msg.includes('[Scheduler|green') || msg.includes('[Scheduler] ✅')) type = 'success'
@@ -212,7 +213,7 @@ export default function Dashboard() {
       return handleInstantAnalyze(input)
     }
 
-    addLog('[System] 📸 Screen frame captured — sending to vision + RAG swarm …', 'swarm')
+    addLog('[System] 📸 Screen frame captured — sending to Gemini Vision + Deep Scraper swarm …', 'swarm')
 
     const res = await fetch(`${API_BASE}/api/analyze-screen`, {
       method: 'POST',

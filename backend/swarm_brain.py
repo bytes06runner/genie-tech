@@ -1,13 +1,12 @@
 """
 swarm_brain.py — The Decision Engine (Multi-Agent Swarm)
 =========================================================
-Five-stage pipeline, all powered by Groq + live web RAG:
+Five-stage STATELESS pipeline — Gemini primary + Groq secondary:
 
-  • Vision  (Groq / llama-4-scout-17b-16e-instruct) — Real pixel-reading from screenshots
-  • RAG     (DuckDuckGo / live_rag.py)               — Zero-cost live web context injection
-  • Alpha   (Groq / llama-3.1-8b-instant)            — Domain-agnostic rapid analyst
-  • Beta    (Groq / llama-3.3-70b-versatile)          — Deep reasoning + RAG cross-reference
-  • Gamma   (Groq / llama-3.3-70b-versatile)          — Final arbiter, universal JSON verdict
+  • Vision  (Gemini 2.5 Flash)      — Industry-leading multimodal screen reading
+  • Alpha   (Groq / llama-3.1-8b)   — Speed-optimised rapid hypothesis (architectural friction)
+  • Beta    (Gemini 2.5 Flash)      — Deep Scraper agent: DDG → Playwright → analysis
+  • Gamma   (Gemini 2.5 Flash)      — Final arbiter, native JSON mode verdict
 
 Output contract (universal):
   {
@@ -17,7 +16,11 @@ Output contract (universal):
     "reasoning":        "detailed synthesis"
   }
 
-100% Groq Architecture — Single provider, zero mock data, live web RAG.
+STATE ISOLATION: Every function builds prompts from LOCAL variables only.
+No global message arrays, no conversation history, no cross-query bleed.
+Each API call = completely blank slate.
+
+Architecture: Google Gemini (primary) + Groq (Alpha only) + Playwright Deep Scraper.
 """
 
 import json
@@ -28,9 +31,11 @@ from typing import Any, Callable, Coroutine, Optional
 
 from dotenv import load_dotenv
 from groq import Groq
+from google import genai
 
-from memory_manager import get_relevant_context, log_memory
-from live_rag import extract_search_query, search_live_context
+from memory_manager import log_memory
+from deep_scraper import deep_scrape
+from live_rag import extract_search_query
 
 load_dotenv()
 logging.basicConfig(
@@ -40,9 +45,10 @@ logging.basicConfig(
 logger = logging.getLogger("swarm_brain")
 
 # ---------------------------------------------------------------------------
-# Single Groq client — all three agents route through here
+# Clients — stateless singletons (no conversation history stored)
 # ---------------------------------------------------------------------------
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Type alias for the broadcast callback
 BroadcastFn = Optional[Callable[[str], Coroutine[Any, Any, None]]]
@@ -50,20 +56,29 @@ BroadcastFn = Optional[Callable[[str], Coroutine[Any, Any, None]]]
 # ---------------------------------------------------------------------------
 # Model routing
 # ---------------------------------------------------------------------------
-ALPHA_MODEL  = "llama-3.1-8b-instant"          # fastest — impulse
-BETA_MODEL   = "llama-3.3-70b-versatile"       # deep reasoning — sentinel
-GAMMA_MODEL  = "llama-3.3-70b-versatile"       # balanced — arbiter
-VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # multimodal — real screen reading
+ALPHA_MODEL  = "llama-3.1-8b-instant"                   # Groq — fastest impulse
+BETA_MODEL   = "gemini-2.5-flash-preview-05-20"         # Gemini — deep scraper analyst
+GAMMA_MODEL  = "gemini-2.5-flash-preview-05-20"         # Gemini — final arbiter (JSON mode)
+VISION_MODEL = "gemini-2.5-flash-preview-05-20"         # Gemini — multimodal vision
 
 # ---------------------------------------------------------------------------
-# System prompts — domain-agnostic elite analysts
+# STATELESS system prompts — every agent is told to IGNORE prior context
 # ---------------------------------------------------------------------------
+_STATELESS_PREAMBLE = (
+    "CRITICAL INSTRUCTION: Base your analysis STRICTLY and ONLY on the provided "
+    "screen text and live scraped data below. You have NO prior context. Do NOT "
+    "assume, recall, or reference any previous queries, tickers, companies, or "
+    "topics. Every analysis starts from a completely blank slate. "
+    "If the provided data is insufficient, say so — do NOT fill gaps with guesses.\n\n"
+)
+
 ALPHA_SYSTEM = (
+    _STATELESS_PREAMBLE +
     "You are Agent Alpha (The Impulse) — an elite, rapid-response AI analyst. "
     "Analyze the extracted screen text and the user's prompt. "
     "Step 1: Identify the domain (Finance, Code, Productivity, Social Media, News, General). "
     "Step 2: Formulate an immediate, highly competent analysis or action plan "
-    "based on what is visible. Be specific — cite data points you see. "
+    "based ONLY on what is visible in the provided data. Be specific — cite data points you see. "
     "Provide your assessment in ≤120 words. "
     "End with a clear RECOMMENDATION: inform, execute, abort, or research. "
     "\n\n"
@@ -74,26 +89,28 @@ ALPHA_SYSTEM = (
 )
 
 BETA_SYSTEM = (
-    "You are Agent Beta (The Sentinel) — the deep-logic and research node. "
+    _STATELESS_PREAMBLE +
+    "You are Agent Beta (The Deep Analyst) — an advanced research and verification node. "
     "You receive: (1) the raw screen data, (2) Alpha's rapid hypothesis, and "
-    "(3) LIVE INTERNET SEARCH RESULTS scraped in real-time from the web. "
-    "Your job: cross-reference the screen data with the live web RAG data. "
+    "(3) REAL WEBPAGE TEXT scraped live from the internet via a headless browser. "
+    "Your job: cross-reference the screen data with the live scraped webpage content. "
     "Identify factual errors, market risks, code bugs, outdated information, "
     "or opportunities Alpha may have missed. "
-    "If the RAG data contradicts the screen, flag it explicitly. "
+    "If the scraped data contradicts the screen, flag it explicitly with specific data points. "
     "Provide your analysis in ≤180 words. "
     "End with a clear RECOMMENDATION: inform, execute, abort, or research."
 )
 
 GAMMA_SYSTEM = (
+    _STATELESS_PREAMBLE +
     "You are Agent Gamma (The Arbiter) — the final consensus engine. "
-    "You receive Alpha's rapid take and Beta's deep RAG-augmented analysis. "
+    "You receive Alpha's rapid take and Beta's deep web-scrape-augmented analysis. "
     "Synthesize their debate into a definitive verdict.\n\n"
     "You MUST output ONLY a valid JSON object with exactly these four keys:\n"
     "{\n"
     '  "domain": "finance" | "code" | "productivity" | "general",\n'
     '  "decision": "inform" | "execute" | "abort" | "research",\n'
-    '  "rag_context_used": "brief one-line summary of live web data that influenced the verdict",\n'
+    '  "rag_context_used": "brief one-line summary of live scraped web data that influenced the verdict",\n'
     '  "reasoning": "detailed, professional synthesis of screen data + live web context"\n'
     "}\n\n"
     "Decision guide:\n"
@@ -105,9 +122,10 @@ GAMMA_SYSTEM = (
 )
 
 VISION_SYSTEM = (
-    "You are a universal screen analysis agent. The user has shared their screen "
-    "and you are seeing a screenshot. Your job is to extract ALL useful information "
-    "from whatever is visible — this could be:\n"
+    _STATELESS_PREAMBLE +
+    "You are a universal screen analysis agent powered by Gemini. The user has shared "
+    "their screen and you are seeing a screenshot. Your job is to extract ALL useful "
+    "information from whatever is visible — this could be:\n"
     "  • Financial charts, tickers, prices, volumes, trends\n"
     "  • Code editors, terminal output, error messages, file structures\n"
     "  • News articles, emails, social media posts\n"
@@ -122,52 +140,49 @@ VISION_SYSTEM = (
 
 
 # ---------------------------------------------------------------------------
-# Vision extraction — Groq Llama 4 Scout (real multimodal)
+# Vision extraction — Gemini 2.5 Flash (multimodal)
 # ---------------------------------------------------------------------------
 
 async def extract_vision_context(image_base64: str, user_command: str, broadcast: BroadcastFn = None) -> str:
     """
-    Pass a real base64 screenshot to Groq's Llama 4 Scout vision model.
-    The model physically reads the pixels — no mock data, no guessing.
-    Domain-agnostic: works on finance, code, news, email, anything.
-    Returns raw extracted text/data from the user's screen.
+    Pass a real base64 screenshot to Gemini 2.5 Flash for vision extraction.
+    Gemini's multimodal capabilities provide industry-leading screen reading.
+    STATELESS: builds a fresh message list on every call — zero history.
     """
-    logger.info("👁️ Vision extraction starting via %s (image: %d chars) …", VISION_MODEL, len(image_base64))
+    logger.info("👁️ Vision extraction starting via Gemini/%s (image: %d chars) …", VISION_MODEL, len(image_base64))
     if broadcast:
-        await broadcast(f"[Vision] 👁️ Sending screenshot to {VISION_MODEL} for real pixel analysis …")
+        await broadcast(f"[Vision] 👁️ Sending screenshot to Gemini {VISION_MODEL} for pixel analysis …")
 
     try:
-        resp = groq_client.chat.completions.create(
+        # Build a completely LOCAL prompt — no global state
+        vision_prompt = (
+            f"User command: {user_command}. "
+            "Extract ALL useful information visible in this screenshot. "
+            "This could include: text, numbers, code, charts, UI elements, "
+            "prices, tickers, error messages, article content, email text, "
+            "dashboard metrics, or any other data. "
+            "Be highly precise and thorough. Return only the raw data. No markdown."
+        )
+
+        # Gemini multimodal: pass image as inline_data part
+        response = gemini_client.models.generate_content(
             model=VISION_MODEL,
-            messages=[
+            contents=[
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"User command: {user_command}. "
-                                "Extract ALL useful information visible in this screenshot. "
-                                "This could include: text, numbers, code, charts, UI elements, "
-                                "prices, tickers, error messages, article content, email text, "
-                                "dashboard metrics, or any other data. "
-                                "Be highly precise and thorough. Return only the raw data. No markdown."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_base64}",
-                            },
-                        },
+                    "parts": [
+                        {"text": VISION_SYSTEM + "\n\n" + vision_prompt},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}},
                     ],
                 }
             ],
-            temperature=0.2,
-            max_tokens=600,
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": 600,
+            },
         )
-        raw_content = resp.choices[0].message.content
-        result = raw_content.strip() if raw_content else "Vision model returned empty response."
+
+        result = response.text.strip() if response.text else "Vision model returned empty response."
 
         logger.info("👁️ Vision extracted: %s", result[:200])
         if broadcast:
@@ -183,22 +198,30 @@ async def extract_vision_context(image_base64: str, user_command: str, broadcast
 
 
 # ---------------------------------------------------------------------------
-# Individual agent calls
+# Individual agent calls — ALL STATELESS (local variables only)
 # ---------------------------------------------------------------------------
 
-async def _call_alpha(text_data: str, context: str, broadcast: BroadcastFn = None) -> str:
-    """Agent Alpha — Groq / llama-3.1-8b-instant (speed-optimised impulse)."""
-    logger.info("🔵 Alpha (Impulse) starting analysis via %s …", ALPHA_MODEL)
+async def _call_alpha(text_data: str, broadcast: BroadcastFn = None) -> str:
+    """
+    Agent Alpha — Groq / llama-3.1-8b-instant (speed-optimised impulse).
+    STATELESS: fresh message list, no memory injection, no global state.
+    """
+    logger.info("🔵 Alpha (Impulse) starting analysis via Groq/%s …", ALPHA_MODEL)
     if broadcast:
-        await broadcast(f"[Alpha/Impulse] Starting rapid analysis via {ALPHA_MODEL} …")
+        await broadcast(f"[Alpha/Impulse] Starting rapid analysis via Groq/{ALPHA_MODEL} …")
 
-    prompt = f"Context from memory:\n{context}\n\nLive data:\n{text_data}"
+    # LOCAL prompt — no prior context, no memory bleed
+    local_prompt = (
+        "Below is the ONLY data you have. Analyze it from scratch.\n\n"
+        f"Live data:\n{text_data}"
+    )
+
     try:
         resp = groq_client.chat.completions.create(
             model=ALPHA_MODEL,
             messages=[
                 {"role": "system", "content": ALPHA_SYSTEM},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": local_prompt},
             ],
             temperature=0.3,
             max_tokens=300,
@@ -215,75 +238,100 @@ async def _call_alpha(text_data: str, context: str, broadcast: BroadcastFn = Non
     return result
 
 
-async def _call_beta(text_data: str, alpha_result: str, context: str, rag_context: str = "", broadcast: BroadcastFn = None) -> str:
-    """Agent Beta — Groq / llama-3.3-70b-versatile (deep reasoning + RAG cross-reference)."""
-    logger.info("🟡 Beta (Sentinel) starting deep reasoning via %s …", BETA_MODEL)
+async def _call_beta(
+    text_data: str,
+    alpha_result: str,
+    scraped_data: str = "",
+    scraped_url: str = "",
+    broadcast: BroadcastFn = None,
+) -> str:
+    """
+    Agent Beta — Gemini 2.5 Flash (deep scraper analyst).
+    Receives Alpha's hypothesis + real scraped webpage content.
+    STATELESS: fresh message list, no memory injection, no global state.
+    """
+    logger.info("🟡 Beta (Deep Analyst) starting via Gemini/%s …", BETA_MODEL)
     if broadcast:
-        await broadcast(f"[Beta/Sentinel] Starting deep logical analysis via {BETA_MODEL} …")
+        await broadcast(f"[Beta/DeepAnalyst] Starting deep analysis via Gemini/{BETA_MODEL} …")
 
-    prompt = (
-        f"Context from memory:\n{context}\n\n"
-        f"Live data (screen):\n{text_data}\n\n"
-        f"Alpha's rapid hypothesis:\n{alpha_result}\n\n"
-        f"=== LIVE INTERNET SEARCH RESULTS (RAG) ===\n{rag_context}\n"
-        f"=== END RAG ===\n\n"
-        "Cross-reference the screen data with the live web results above. "
-        "Flag any contradictions, risks, or opportunities."
+    # LOCAL prompt — all data is passed explicitly, no global references
+    local_prompt = (
+        "Below is ALL the data you have. You have NO prior context.\n\n"
+        f"=== SCREEN DATA ===\n{text_data}\n=== END SCREEN DATA ===\n\n"
+        f"=== ALPHA'S HYPOTHESIS ===\n{alpha_result}\n=== END ALPHA ===\n\n"
+        f"=== LIVE SCRAPED WEBPAGE (from {scraped_url}) ===\n{scraped_data}\n=== END SCRAPED DATA ===\n\n"
+        "Cross-reference the screen data with the scraped webpage content above. "
+        "Flag any contradictions, risks, or opportunities with specific data points."
     )
+
     try:
-        resp = groq_client.chat.completions.create(
+        response = gemini_client.models.generate_content(
             model=BETA_MODEL,
-            messages=[
-                {"role": "system", "content": BETA_SYSTEM},
-                {"role": "user", "content": prompt},
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [{"text": BETA_SYSTEM + "\n\n" + local_prompt}],
+                }
             ],
-            temperature=0.2,
-            max_tokens=400,
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": 400,
+            },
         )
-        raw_content = resp.choices[0].message.content
-        result = raw_content.strip() if raw_content else "Beta returned empty response. Defaulting to caution."
+        result = response.text.strip() if response.text else "Beta returned empty response. Defaulting to caution."
     except Exception as e:
-        result = "Risk audit unavailable. Defaulting to high-caution state."
+        result = f"Gemini Beta error: {str(e)[:80]}. Defaulting to high-caution state."
         logger.error("Beta error: %s", e)
 
     logger.info("🟡 Beta result: %s", result[:200])
     log_memory("Beta", result[:500])
     if broadcast:
-        await broadcast(f"[Beta/Sentinel] {result}")
+        await broadcast(f"[Beta/DeepAnalyst] {result}")
     return result
 
 
 async def _call_gamma(
     alpha_result: str,
     beta_result: str,
-    context: str,
-    rag_summary: str = "",
+    scraped_summary: str = "",
     broadcast: BroadcastFn = None,
 ) -> dict:
-    """Agent Gamma — Groq / llama-3.3-70b-versatile (arbiter, universal JSON via Groq native JSON mode)."""
-    logger.info("🟢 Gamma (Arbiter) making final consensus via %s …", GAMMA_MODEL)
+    """
+    Agent Gamma — Gemini 2.5 Flash (arbiter, native JSON mode).
+    Uses response_mime_type: application/json for enforced schema.
+    STATELESS: fresh message list, no memory injection, no global state.
+    """
+    logger.info("🟢 Gamma (Arbiter) making final consensus via Gemini/%s …", GAMMA_MODEL)
     if broadcast:
-        await broadcast(f"[Gamma/Arbiter] Synthesising final consensus via {GAMMA_MODEL} …")
+        await broadcast(f"[Gamma/Arbiter] Synthesising final consensus via Gemini/{GAMMA_MODEL} …")
 
-    prompt = (
-        f"Context:\n{context}\n\n"
-        f"Alpha says:\n{alpha_result}\n\n"
-        f"Beta says (RAG-augmented):\n{beta_result}\n\n"
-        f"RAG summary available: {rag_summary[:200] if rag_summary else 'None'}\n\n"
+    # LOCAL prompt — zero prior context
+    local_prompt = (
+        "Below is ALL the data you have. You have NO prior context. "
+        "Do NOT reference any previous queries or topics.\n\n"
+        f"=== ALPHA SAYS ===\n{alpha_result}\n=== END ALPHA ===\n\n"
+        f"=== BETA SAYS (web-scrape-augmented) ===\n{beta_result}\n=== END BETA ===\n\n"
+        f"Scraped web summary: {scraped_summary[:200] if scraped_summary else 'None'}\n\n"
         "Produce your final JSON verdict with keys: domain, decision, rag_context_used, reasoning."
     )
+
     try:
-        resp = groq_client.chat.completions.create(
+        response = gemini_client.models.generate_content(
             model=GAMMA_MODEL,
-            messages=[
-                {"role": "system", "content": GAMMA_SYSTEM},
-                {"role": "user", "content": prompt},
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [{"text": GAMMA_SYSTEM + "\n\n" + local_prompt}],
+                }
             ],
-            temperature=0.1,
-            max_tokens=400,
-            response_format={"type": "json_object"},
+            config={
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": 400,
+            },
         )
-        raw = resp.choices[0].message.content.strip()
+
+        raw = response.text.strip() if response.text else "{}"
         result = json.loads(raw)
 
         # Ensure all four keys exist with sane defaults
@@ -309,7 +357,7 @@ async def _call_gamma(
             "domain": "general",
             "decision": "abort",
             "rag_context_used": "none",
-            "reasoning": "Swarm network congested. Safe mode engaged.",
+            "reasoning": f"Gemini Gamma error: {str(e)[:80]}. Safe mode engaged.",
         }
         logger.error("Gamma error: %s", e)
 
@@ -332,7 +380,7 @@ async def _call_gamma(
 
 
 # ---------------------------------------------------------------------------
-# Public orchestrator
+# Public orchestrator — FULLY STATELESS
 # ---------------------------------------------------------------------------
 
 async def run_swarm(
@@ -341,12 +389,15 @@ async def run_swarm(
     broadcast: BroadcastFn = None,
 ) -> dict:
     """
-    Orchestrate the five-stage swarm pipeline on TEXT data:
-      1. Extract search query from screen text
-      2. Live web RAG via DuckDuckGo
-      3. Alpha (rapid hypothesis)
-      4. Beta  (deep reasoning + RAG cross-reference)
-      5. Gamma (final JSON verdict)
+    Orchestrate the five-stage STATELESS swarm pipeline:
+      1. Extract search query from screen text (local derivation)
+      2. Deep Scrape via Playwright (DDG URL → headless browser → page text)
+      3. Alpha — Groq rapid hypothesis (STATELESS)
+      4. Beta  — Gemini deep analysis + scraped web cross-reference (STATELESS)
+      5. Gamma — Gemini final JSON verdict (STATELESS, native JSON mode)
+
+    CRITICAL: All variables are LOCAL. No global message arrays, no conversation
+    history, no cross-query state pollution. Each call = blank slate.
 
     Parameters
     ----------
@@ -361,42 +412,57 @@ async def run_swarm(
     -------
     dict  {"domain", "decision", "rag_context_used", "reasoning"}
     """
+    # ── ALL LOCAL VARIABLES — no global state ──
+    local_text = str(text_data)  # defensive copy
+    local_search_query = ""
+    local_scraped_text = ""
+    local_scraped_url = ""
+    local_alpha_result = ""
+    local_beta_result = ""
+
     logger.info("=" * 60)
-    logger.info("SWARM INITIATED  |  data length=%d chars  |  vision=%s", len(text_data), force_vision)
+    logger.info("SWARM INITIATED  |  data length=%d chars  |  vision=%s", len(local_text), force_vision)
     logger.info("=" * 60)
 
     if broadcast:
         await broadcast("[Swarm] ══════════ SWARM INITIATED ══════════")
 
-    # Retrieve token-capped context from memory
-    context = get_relevant_context(text_data[:200], max_tokens=500)
-
-    # ── Stage 1: Extract search query + Live Web RAG ──
-    search_query = extract_search_query(text_data, "")
-    logger.info("🌐 RAG query extracted: '%s'", search_query)
+    # ── Stage 1: Extract search query + Deep Scrape ──
+    local_search_query = extract_search_query(local_text, "")
+    logger.info("🌐 Search query extracted: '%s'", local_search_query)
     if broadcast:
-        await broadcast(f"[RAG] 🌐 Searching the web for: \"{search_query}\" …")
+        await broadcast(f"[DeepScraper] 🔍 Searching & scraping the web for: \"{local_search_query}\" …")
 
-    rag_context = await search_live_context(search_query, max_results=3)
+    scrape_result = await deep_scrape(local_search_query, timeout_seconds=8)
+    local_scraped_text = scrape_result.get("text", "")
+    local_scraped_url = scrape_result.get("url", "")
 
     if broadcast:
-        rag_preview = rag_context[:80].replace("\n", " ")
-        has_data = "No live context" not in rag_context
-        if has_data:
-            await broadcast(f"[RAG] 🌐 Live web context injected: {rag_preview}…")
+        if scrape_result.get("success"):
+            preview = local_scraped_text[:80].replace("\n", " ")
+            await broadcast(f"[DeepScraper] ✅ Scraped {len(local_scraped_text)} chars from {local_scraped_url}: {preview}…")
         else:
-            await broadcast("[RAG] ⚠️ No live web results — proceeding with screen data only.")
+            await broadcast("[DeepScraper] ⚠️ Scrape failed — proceeding with screen data only.")
 
-    # ── Stage 2: Alpha (rapid hypothesis) ──
-    alpha_result = await _call_alpha(text_data, context, broadcast)
-    await asyncio.sleep(1.5)   # burst protection — avoid Groq rate-limit flags
+    # ── Stage 2: Alpha (Groq — rapid hypothesis, STATELESS) ──
+    local_alpha_result = await _call_alpha(local_text, broadcast)
+    await asyncio.sleep(1.5)  # burst protection
 
-    # ── Stage 3: Beta (deep reasoning + RAG cross-reference) ──
-    beta_result = await _call_beta(text_data, alpha_result, context, rag_context, broadcast)
-    await asyncio.sleep(1.5)   # burst protection — avoid Groq rate-limit flags
+    # ── Stage 3: Beta (Gemini — deep analysis + scraped data, STATELESS) ──
+    local_beta_result = await _call_beta(
+        local_text, local_alpha_result,
+        scraped_data=local_scraped_text,
+        scraped_url=local_scraped_url,
+        broadcast=broadcast,
+    )
+    await asyncio.sleep(1.0)  # burst protection
 
-    # ── Stage 4: Gamma (final arbiter) ──
-    gamma_verdict = await _call_gamma(alpha_result, beta_result, context, rag_context, broadcast)
+    # ── Stage 4: Gamma (Gemini — final arbiter, STATELESS, JSON mode) ──
+    gamma_verdict = await _call_gamma(
+        local_alpha_result, local_beta_result,
+        scraped_summary=local_scraped_text[:300],
+        broadcast=broadcast,
+    )
 
     logger.info("=" * 60)
     logger.info("SWARM COMPLETE  |  verdict=%s", gamma_verdict)
