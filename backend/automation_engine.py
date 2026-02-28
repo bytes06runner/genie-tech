@@ -738,34 +738,53 @@ async def parse_workflow_from_nl(text: str, tg_id: int) -> dict:
         "You MUST respond with ONLY a single raw JSON object. "
         "Do NOT include any markdown formatting, code fences, backticks, "
         "introductory text, explanations, or trailing commentary. "
-        "Your entire response must be parseable by json.loads() directly."
+        "Your entire response must be parseable by json.loads() directly.\n\n"
+        "CRITICAL RULE: If the user's request involves news, headlines, articles, blog posts, "
+        "or any form of content aggregation, you MUST use the \"fetch_rss\" action type with a "
+        "real RSS feed URL. You MUST NEVER use \"web_scrape\" for news. web_scrape will FAIL on "
+        "news sites because they block bots. fetch_rss is the ONLY reliable method for news."
     )
 
     user_prompt = f"""Parse this user request into a workflow JSON.
 
 User request: "{text}"
 
-Available action types:
-- "ai_analyze": Run AI swarm analysis. config: {{"prompt": "what to analyze"}}
-- "fetch_rss": Fetch news from an RSS feed (PREFERRED for any news/headlines request). config: {{"feed_url": "https://...", "max_items": 5}}
-  Common RSS feeds:
-    Crypto: "https://cointelegraph.com/rss" or "https://www.coindesk.com/arc/outboundfeeds/rss/"
-    Tech: "https://feeds.arstechnica.com/arstechnica/index" or "https://hnrss.org/frontpage"
-    Finance: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US"
-    AI: "https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml"
-    General: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
-- "web_scrape": Scrape a webpage (use only if no RSS feed is suitable). config: {{"query": "search query"}}
-- "stock_lookup": Get stock data. config: {{"ticker": "AAPL"}}
-- "youtube_research": Analyze YouTube video. config: {{"url": "youtube url"}}
-- "send_message": Send Telegram message. config: {{"message": "text", "tg_id": {tg_id}}}
-- "http_request": Make HTTP call. config: {{"url": "...", "method": "GET"}}
-- "condition": Check a condition. config: {{"condition": "expression"}}
-- "delay": Wait. config: {{"seconds": 10}}
-- "transform": Format data. config: {{"template": "text with {{{{variables}}}}"}}
+Available action types (in order of preference):
+1. "fetch_rss": Fetch news/articles from an RSS feed. MANDATORY for any news request. config: {{"feed_url": "https://...", "max_items": 5}}
+   Known working RSS feeds:
+     Crypto/Blockchain: "https://cointelegraph.com/rss"
+     Crypto alt: "https://www.coindesk.com/arc/outboundfeeds/rss/"
+     Tech: "https://feeds.arstechnica.com/arstechnica/index"
+     Hacker News: "https://hnrss.org/frontpage"
+     Finance: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US"
+     AI/ML: "https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml"
+     General: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+2. "ai_analyze": Run AI swarm analysis. config: {{"prompt": "what to analyze"}}
+3. "stock_lookup": Get stock price data. config: {{"ticker": "AAPL"}}
+4. "youtube_research": Analyze a YouTube video. config: {{"url": "youtube url"}}
+5. "send_message": Send Telegram message. config: {{"message": "text", "tg_id": {tg_id}}}
+6. "http_request": Make HTTP call. config: {{"url": "...", "method": "GET"}}
+7. "web_scrape": Scrape a specific non-news webpage ONLY. config: {{"query": "search query"}}
+8. "condition": Check a condition. config: {{"condition": "expression"}}
+9. "delay": Wait N seconds. config: {{"seconds": 10}}
+10. "transform": Format data. config: {{"template": "text with {{{{variables}}}}"}}
 
-IMPORTANT RULES:
-- For ANY request involving "news", "headlines", or "latest articles", ALWAYS use "fetch_rss" with an appropriate feed URL. Do NOT use "web_scrape" for news.
-- When the workflow fetches data (fetch_rss, stock_lookup, web_scrape), the send_message step should use {{{{step_N_output}}}} to reference that data (where N is the step number that produced it).
+EXAMPLE — "Every 10 minutes fetch crypto news and send it to me":
+{{
+  "name": "Crypto News Feed",
+  "description": "Fetches latest crypto news from CoinTelegraph RSS and sends to user",
+  "trigger_type": "interval",
+  "trigger_config": {{"interval_minutes": 10}},
+  "steps": [
+    {{"name": "Fetch Crypto News", "type": "fetch_rss", "config": {{"feed_url": "https://cointelegraph.com/rss", "max_items": 5}}}},
+    {{"name": "Send News", "type": "send_message", "config": {{"message": "{{{{step_1_output}}}}", "tg_id": {tg_id}}}}}
+  ]
+}}
+
+RULES:
+- For ANY request involving "news", "headlines", "articles", "updates", or "latest" → use "fetch_rss". NEVER "web_scrape".
+- send_message should reference data from earlier steps using {{{{step_N_output}}}} (N = step number).
+- Pick the most relevant RSS feed URL from the list above based on the user's topic.
 
 Available trigger types:
 - "interval": Repeat every N minutes. config: {{"interval_minutes": 60}}
@@ -794,7 +813,74 @@ Respond with ONLY this JSON structure (no other text):
         max_tokens=800,
     )
     raw = resp.choices[0].message.content
-    return _safe_parse_json(raw)
+    parsed = _safe_parse_json(raw)
+
+    # ── Post-processing safety net: auto-swap web_scrape → fetch_rss for news ──
+    parsed = _enforce_rss_for_news(parsed, text, tg_id)
+
+    return parsed
+
+
+# RSS feed URL mapping for common news topics
+_RSS_FEED_MAP = {
+    "crypto":     "https://cointelegraph.com/rss",
+    "bitcoin":    "https://cointelegraph.com/rss",
+    "blockchain": "https://cointelegraph.com/rss",
+    "ethereum":   "https://cointelegraph.com/rss",
+    "defi":       "https://cointelegraph.com/rss",
+    "web3":       "https://cointelegraph.com/rss",
+    "tech":       "https://feeds.arstechnica.com/arstechnica/index",
+    "technology": "https://feeds.arstechnica.com/arstechnica/index",
+    "ai":         "https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml",
+    "artificial intelligence": "https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml",
+    "finance":    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+    "stock":      "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+    "market":     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+}
+_NEWS_KEYWORDS = re.compile(
+    r'\b(news|headlines|articles|latest|updates|feed|digest|bulletin)\b', re.IGNORECASE
+)
+
+
+def _enforce_rss_for_news(parsed: dict, user_text: str, tg_id: int) -> dict:
+    """
+    Post-processing guard: if the LLM still generated a web_scrape step for
+    something that looks like a news request, auto-replace it with fetch_rss.
+    """
+    steps = parsed.get("steps", [])
+    user_lower = user_text.lower()
+    is_news_request = bool(_NEWS_KEYWORDS.search(user_text))
+
+    changed = False
+    for step in steps:
+        if step.get("type") != "web_scrape":
+            continue
+
+        # Check if this web_scrape step's query or the user's original text
+        # indicates a news request
+        query = step.get("config", {}).get("query", "").lower()
+        step_looks_like_news = bool(_NEWS_KEYWORDS.search(query)) or is_news_request
+
+        if step_looks_like_news:
+            # Determine best RSS feed from topic keywords
+            feed_url = "https://cointelegraph.com/rss"  # default
+            for keyword, url in _RSS_FEED_MAP.items():
+                if keyword in user_lower or keyword in query:
+                    feed_url = url
+                    break
+
+            logger.warning(
+                "🔄 Auto-swapping web_scrape → fetch_rss for step '%s' (query=%r → feed=%s)",
+                step.get("name", "?"), query, feed_url,
+            )
+            step["type"] = "fetch_rss"
+            step["config"] = {"feed_url": feed_url, "max_items": 5}
+            changed = True
+
+    if changed:
+        parsed["steps"] = steps
+
+    return parsed
 
 
 # ═══════════════════════════════════════════════════════════════════
