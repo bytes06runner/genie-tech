@@ -72,7 +72,7 @@ logging.basicConfig(
 logger = logging.getLogger("tg_bot")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://x10v-webapp.vercel.app")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://webapp-ten-fawn-33.vercel.app")
 DEFAULT_ALLOCATION = 100.0
 
 
