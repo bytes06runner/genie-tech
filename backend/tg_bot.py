@@ -1,27 +1,26 @@
 """
-tg_bot.py — X10V Autonomous Telegram Trading Bot
+tg_bot.py — X10V Ultimate Automation Telegram Bot
 ====================================================
-Main entry point. Bridges Telegram commands to the Gemini AI Swarm,
-Paper Trading Engine, Algorand Wallet, and Async Market Monitor.
+Full-featured Telegram bot matching website capabilities. Features:
 
-Commands:
-  /start                — Initialise user profile ($1,000 demo balance)
-  /connect_wallet       — Open Mini App to connect Lute Wallet (Web3)
-  /disconnect           — Remove linked wallet address
-  /reset_wallet         — Alias for /disconnect (force-clear)
-  /analyze <asset>      — Trigger swarm analysis on any asset
-  /transact             — Open Web3 Bridge for Algorand transactions
-  /portfolio            — View balance, open positions, active monitors
-  /close <position_id>  — Close an open paper trade
-  /monitors             — List active price monitors
-  /cancel <job_id>      — Cancel an active price monitor
-  /help                 — Show all commands
+  🧠 3-LLM Swarm Chatbot   — Every message routes through Alpha→Beta→Gamma
+  📊 Real-Time Stock Data   — yfinance + web scraping for 90-95% accuracy
+  🕷️ Web Scraping           — Playwright deep scraper on demand
+  ⚡ n8n-Style Workflows    — Multi-step automation pipelines with triggers
+  📬 Scheduled Messages     — Recurring and one-shot automated messaging
+  📺 YouTube Research       — Domain-agnostic deep research summaries
+  🎯 Trading Rules          — Dynamic rule engine evaluated every 60s
+  💹 Paper Trading          — Full paper trading with mock Groww execution
+  🔗 Algorand Wallet        — Web3 Mini App wallet via Lute Extension
+  🤖 Natural Language AI    — Groq parses rules, workflows, schedules from text
 
-Architecture:
-  python-telegram-bot v20+ (async) → swarm_brain.py → paper_engine.py
-  APScheduler market_monitor.py runs autonomously in the background.
-  Wallet connection is fully Web3 via Telegram Mini App + Lute Extension.
-  Zero backend key generation — no algosdk.account, no mnemonics.
+Commands (30+):
+  /start, /help, /chat, /stock, /news, /scrape, /research,
+  /workflow, /my_workflows, /run_workflow, /delete_workflow,
+  /schedule, /my_schedules, /delete_schedule,
+  /set_rule, /my_rules, /delete_rule, /suggest,
+  /analyze, /portfolio, /mock_trade, /trade_history, /close,
+  /monitors, /cancel, /connect_wallet, /disconnect, /reset_wallet, /transact
 """
 
 import asyncio
@@ -29,7 +28,9 @@ import json
 import logging
 import os
 import re
+import time as _time
 from typing import Optional
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -70,197 +71,671 @@ from rule_engine import (
     set_rule_notify,
     get_smart_suggestions,
 )
+from automation_engine import (
+    init_automation_db,
+    create_workflow,
+    get_user_workflows,
+    delete_workflow,
+    toggle_workflow,
+    execute_workflow,
+    evaluate_workflows,
+    create_scheduled_message,
+    get_user_scheduled_messages,
+    delete_scheduled_message,
+    evaluate_scheduled_messages,
+    parse_workflow_from_nl,
+    parse_scheduled_message_nl,
+    set_automation_notify,
+    _fetch_stock_data,
+    execute_action_node,
+)
 
 load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("tg_bot")
 
-import time as _time
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://webapp-ten-fawn-33.vercel.app")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://x10v-webapp.vercel.app")
 DEFAULT_ALLOCATION = 100.0
 
 
-async def tg_notify(tg_user_id: int, message: str):
-    """Send a push notification to a user via Telegram. Used by market_monitor."""
-    try:
-        from telegram import Bot
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        await bot.send_message(
-            chat_id=tg_user_id,
-            text=message,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    except Exception as e:
-        logger.error("Failed to send TG notification to %d: %s", tg_user_id, e)
+# ═══════════════════════════════════════════════════════════════════
+#  TG NOTIFY — Push messages to any user from anywhere
+# ═══════════════════════════════════════════════════════════════════
 
+_bot_app = None
+
+async def tg_notify(tg_id: int, text: str):
+    """Push a message to a Telegram user from any module."""
+    global _bot_app
+    if _bot_app and _bot_app.bot:
+        try:
+            await _bot_app.bot.send_message(
+                chat_id=tg_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            logger.error("tg_notify failed for %d: %s", tg_id, e)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /start — User Onboarding
+# ═══════════════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /start — register user with $1,000 demo balance."""
     tg_id = update.effective_user.id
-    username = update.effective_user.username or update.effective_user.first_name or ""
+    name = update.effective_user.first_name or "Agent"
+    user = await get_user(tg_id)
 
-    user = await create_user(tg_id, username)
-    is_new = user.get("is_new", False)
-
-    if is_new:
-        text = (
-            "🚀 *Welcome to X10V Autonomous Trading Bot*\n\n"
-            f"Hey {username}! Your profile is live.\n\n"
-            "💰 *Demo Balance:* `$1,000.00`\n"
-            "🔗 *Wallet:* Not connected\n\n"
-            "Get started:\n"
-            "• `/analyze XAU/USD` — AI Swarm analysis\n"
-            "• `/connect_wallet` — Link Algorand Testnet\n"
-            "• `/portfolio` — View your positions\n"
-            "• `/help` — All commands"
+    if not user:
+        await create_user(tg_id)
+        await update.message.reply_text(
+            f"🚀 *Welcome to X10V, {name}!*\n\n"
+            f"Your AI-powered automation headquarters.\n\n"
+            f"💰 *$1,000* demo balance loaded\n"
+            f"🧠 3-LLM Swarm (Gemini + Groq) ready\n"
+            f"📊 Real-time stock data engine online\n"
+            f"⚡ n8n-style workflow automation enabled\n"
+            f"📬 Scheduled messaging activated\n\n"
+            f"*Quick Start:*\n"
+            f"• Just *type anything* → AI Swarm responds\n"
+            f"• `/stock AAPL` → Real-time stock data\n"
+            f"• `/workflow` → Create automations\n"
+            f"• `/help` → See all 30+ commands\n\n"
+            f"_Powered by Gemini 2.5 Flash + Groq + Playwright_",
+            parse_mode=ParseMode.MARKDOWN,
         )
     else:
-        balance = user.get("balance", 0)
-        wallet = "✅ Connected" if user.get("algo_address") else "❌ Not connected"
-        text = (
-            "👋 *Welcome back to X10V!*\n\n"
-            f"💰 *Balance:* `${balance:.2f}`\n"
-            f"🔗 *Wallet:* {wallet}\n\n"
-            "Use `/help` to see all commands."
+        await update.message.reply_text(
+            f"👋 *Welcome back, {name}!*\n\n"
+            f"💰 Balance: `${user.get('balance', 0):.2f}`\n"
+            f"🔗 Wallet: `{user.get('algo_address', 'Not connected')}`\n\n"
+            f"Type anything to chat with the AI Swarm, or use `/help` for commands.",
+            parse_mode=ParseMode.MARKDOWN,
         )
+    log_memory("TelegramBot", f"/start by user {tg_id} ({name})")
 
+
+# ═══════════════════════════════════════════════════════════════════
+#  /help — Command Reference
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🤖 *X10V Ultimate Automation Bot*\n\n"
+
+        "━━━ 🧠 *AI & Chat* ━━━\n"
+        "  _Just type anything_ — 3-LLM Swarm responds\n"
+        "  `/chat <msg>` — Force swarm analysis\n\n"
+
+        "━━━ 📊 *Real-Time Data* ━━━\n"
+        "  `/stock <ticker>` — Live stock/crypto data\n"
+        "  `/news <topic>` — Web-scraped latest news\n"
+        "  `/scrape <query>` — Deep web scrape\n"
+        "  `/research <yt_url>` — YouTube deep research\n\n"
+
+        "━━━ ⚡ *Automation Workflows* ━━━\n"
+        "  `/workflow <description>` — Create n8n-style workflow\n"
+        "  `/my_workflows` — List your workflows\n"
+        "  `/run_workflow <id>` — Manually trigger a workflow\n"
+        "  `/pause_workflow <id>` — Pause/resume workflow\n"
+        "  `/delete_workflow <id>` — Delete a workflow\n\n"
+
+        "━━━ 📬 *Scheduled Messages* ━━━\n"
+        "  `/schedule <description>` — Schedule automated messages\n"
+        "  `/my_schedules` — List scheduled messages\n"
+        "  `/delete_schedule <id>` — Remove scheduled message\n\n"
+
+        "━━━ 🎯 *Trading Rules* ━━━\n"
+        "  `/set_rule <rule>` — Create automation rule\n"
+        "  `/my_rules` — View your rules\n"
+        "  `/delete_rule <id>` — Remove a rule\n"
+        "  `/suggest` — AI-powered smart suggestions\n\n"
+
+        "━━━ 💹 *Trading* ━━━\n"
+        "  `/analyze <asset>` — AI Swarm asset analysis\n"
+        "  `/mock_trade <asset> <amt>` — Paper trade\n"
+        "  `/trade_history` — View trade log\n"
+        "  `/portfolio` — Balance & positions\n"
+        "  `/close <id>` — Close a position\n"
+        "  `/monitors` — Active price watchers\n"
+        "  `/cancel <job_id>` — Stop a monitor\n\n"
+
+        "━━━ 🔗 *Wallet* ━━━\n"
+        "  `/connect_wallet` — Link Lute wallet\n"
+        "  `/transact` — Algorand Web3 Bridge\n"
+        "  `/disconnect` — Remove wallet\n"
+        "  `/reset_wallet` — Force-clear wallet\n\n"
+
+        "_Type naturally — the AI understands rules, schedules, and queries from plain text!_"
+    )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    log_memory("TelegramBot", f"/start by user {tg_id} ({username})")
 
 
-async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /connect_wallet — open Mini App for real Lute Wallet connection."""
-    tg_id = update.effective_user.id
-    user = await get_user(tg_id)
-    if not user:
-        await update.message.reply_text("⚠️ Use `/start` first to create your profile.", parse_mode=ParseMode.MARKDOWN)
+# ═══════════════════════════════════════════════════════════════════
+#  /stock <ticker> — Real-Time Stock Data (90-95% accuracy)
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "📊 *Usage:* `/stock <ticker>`\n\n"
+            "*Examples:*\n"
+            "• `/stock AAPL` — Apple Inc.\n"
+            "• `/stock TSLA` — Tesla\n"
+            "• `/stock RELIANCE.NS` — Reliance (NSE)\n"
+            "• `/stock BTC-USD` — Bitcoin\n"
+            "• `/stock ETH-USD` — Ethereum\n"
+            "• `/stock XAU=F` — Gold\n"
+            "• `/stock ^GSPC` — S&P 500",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
-    connect_url = f"{WEBAPP_URL}?mode=connect&_t={int(_time.time())}"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            text="🔗 Connect Lute Wallet",
-            web_app=WebAppInfo(url=connect_url),
-        )],
-    ])
-
-    if user.get("algo_address"):
-        await update.message.reply_text(
-            f"🔗 *Current Wallet*\n\n"
-            f"Address: `{user['algo_address']}`\n\n"
-            f"Tap below to *update* to a different Lute wallet, "
-            f"or use `/disconnect` to remove it entirely.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard,
-        )
-    else:
-        await update.message.reply_text(
-            "🔗 *Connect Your Algorand Wallet*\n\n"
-            "Tap below to open the Web3 Bridge.\n"
-            "Connect your *Lute Wallet* and your real TestNet address "
-            "will be linked automatically.\n\n"
-            "_Make sure the Lute browser extension is installed and set to TestNet._",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard,
-        )
-    log_memory("TelegramBot", f"/connect_wallet (Mini App) by user {tg_id}")
-
-
-async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive real wallet address from the Telegram Mini App via web_app_data."""
-    tg_id = update.effective_user.id
-    raw_data = update.effective_message.web_app_data.data
+    ticker = " ".join(context.args).upper().strip()
+    await update.message.reply_text(f"📊 _Fetching real-time data for_ `{ticker}` …", parse_mode=ParseMode.MARKDOWN)
 
     try:
-        payload = json.loads(raw_data)
-        address = payload.get("address", "").strip()
-    except (json.JSONDecodeError, AttributeError):
-        address = raw_data.strip()
+        data = await _fetch_stock_data(ticker)
+        await update.message.reply_text(data, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Failed to fetch data: {str(e)[:200]}")
 
-    if not address or len(address) < 20:
-        await update.message.reply_text("⚠️ Invalid wallet address received from Mini App.")
+    log_memory("TelegramBot", f"/stock {ticker}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /news <topic> — Web-Scraped News
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "📰 *Usage:* `/news <topic>`\n\n"
+            "*Examples:*\n"
+            "• `/news AAPL earnings`\n"
+            "• `/news crypto market today`\n"
+            "• `/news Indian stock market`\n"
+            "• `/news AI industry trends`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
-    user = await get_user(tg_id)
-    if not user:
-        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+    topic = " ".join(context.args)
+    await update.message.reply_text(f"📰 _Scraping latest news on_ `{topic}` …", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        from deep_scraper import deep_scrape
+
+        # Multi-source scraping for better coverage
+        results = []
+        queries = [
+            f"{topic} latest news today",
+            f"{topic} market analysis",
+        ]
+
+        for q in queries:
+            result = await deep_scrape(q, timeout_seconds=8)
+            if result.get("success"):
+                results.append(result)
+
+        if not results:
+            await update.message.reply_text("⚠️ Could not scrape any relevant news. Try different keywords.")
+            return
+
+        # Send to swarm for synthesis
+        combined_text = "\n\n---\n\n".join(
+            f"Source: {r.get('url', 'N/A')}\n{r.get('text', '')[:800]}"
+            for r in results
+        )
+
+        verdict = await run_swarm(
+            text_data=f"Synthesize these news articles about '{topic}':\n\n{combined_text}",
+            user_command=f"News summary for {topic}",
+        )
+
+        sd = verdict.get("structured_data", {})
+        summary = sd.get("summary", "No summary generated.")
+        metrics = sd.get("timeline_or_metrics", [])
+
+        response = f"📰 *News Digest: {topic}*\n\n{summary}\n\n"
+        if metrics:
+            response += "📋 *Key Points:*\n"
+            for m in metrics[:8]:
+                response += f"  • *{m.get('key', '')}:* {m.get('value', '')}\n"
+            response += "\n"
+
+        for r in results[:2]:
+            if r.get("url"):
+                response += f"🔗 [Source]({r['url']})\n"
+
+        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ News fetch failed: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"/news {topic}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /scrape <query> — Deep Web Scraping
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "🕷️ *Usage:* `/scrape <query>`\n\n"
+            "*Examples:*\n"
+            "• `/scrape Tesla Q4 earnings report`\n"
+            "• `/scrape Python FastAPI tutorial`\n"
+            "• `/scrape React best practices 2025`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
-    await link_wallet(tg_id, address, "lute-external-wallet")
+    query = " ".join(context.args)
+    await update.message.reply_text(f"🕷️ _Deep scraping_ `{query}` …", parse_mode=ParseMode.MARKDOWN)
 
-    await update.message.reply_text(
-        f"✅ *Successfully connected real wallet!*\n\n"
-        f"📬 *Address:*\n`{address}`\n\n"
-        f"💧 *Fund it:* [Algorand Testnet Dispenser](https://bank.testnet.algorand.network/)\n\n"
-        f"_Your Lute Wallet is now linked to X10V. Use `/portfolio` to check your status._",
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True,
-    )
-    log_memory("TelegramBot", f"Real wallet connected via Mini App for user {tg_id}: {address[:16]}…")
+    try:
+        from deep_scraper import deep_scrape
+        result = await deep_scrape(query, timeout_seconds=10)
+
+        if result.get("success"):
+            text = result.get("text", "")[:3000]
+            url = result.get("url", "")
+            response = f"🕷️ *Scraped Data*\n\n"
+            if url:
+                response += f"🔗 Source: {url}\n\n"
+            response += f"```\n{text[:2500]}\n```"
+            await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        else:
+            await update.message.reply_text("⚠️ Scraping failed — no data retrieved. Try different keywords.")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Scrape error: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"/scrape {query}")
 
 
-async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /disconnect — wipe saved wallet address so user can start fresh."""
+# ═══════════════════════════════════════════════════════════════════
+#  /research <youtube_url> — YouTube Deep Research
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_research(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "📺 *Usage:* `/research <youtube_url>`\n\n"
+            "*Examples:*\n"
+            "• `/research https://youtube.com/watch?v=dQw4w9WgXcQ`\n"
+            "• `/research youtu.be/abc123`\n\n"
+            "_Generates a comprehensive domain-adaptive research summary._",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    url = context.args[0]
+    await update.message.reply_text(f"📺 _Analyzing video_ …\n_Extracting transcript + running AI research pipeline_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        from yt_research import research_video
+        result = await research_video(url)
+
+        if result.get("error"):
+            await update.message.reply_text(f"⚠️ {result['error']}")
+            return
+
+        # Send structured results
+        data = result.get("data", {})
+        title = data.get("title", "Unknown")
+        domain = data.get("domain", "general")
+        tone = data.get("tone", "neutral")
+        executive = data.get("executive_summary", "")
+        insights = data.get("deep_insights", [])
+        topics = data.get("mentioned_topics", [])
+        takeaways = data.get("key_takeaways", [])
+
+        response = (
+            f"📺 *YouTube Research Complete*\n\n"
+            f"🎬 *{title}*\n"
+            f"🏷️ Domain: `{domain}` | Tone: `{tone}`\n\n"
+            f"📝 *Executive Summary:*\n{executive}\n\n"
+        )
+
+        if insights:
+            response += "🔬 *Deep Insights:*\n"
+            for ins in insights[:5]:
+                response += f"  • *{ins.get('topic', '')}:* {ins.get('insight', '')}\n"
+            response += "\n"
+
+        if takeaways:
+            response += "🎯 *Key Takeaways:*\n"
+            for t in takeaways[:5]:
+                response += f"  • {t}\n"
+            response += "\n"
+
+        if topics:
+            topics_str = ", ".join(f"`{t}`" for t in topics[:10])
+            response += f"📋 *Topics:* {topics_str}\n"
+
+        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Research failed: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"/research {url}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /workflow — n8n-Style Automation Workflows
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
         await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    if not user.get("algo_address"):
+    if not context.args:
         await update.message.reply_text(
-            "ℹ️ No wallet is currently connected.\n\n"
-            "Use `/connect_wallet` to link one.",
+            "⚡ *Create Automation Workflow*\n\n"
+            "Describe what you want in plain English!\n\n"
+            "*Examples:*\n"
+            "• `/workflow Every hour check AAPL price and send me an update`\n"
+            "• `/workflow When Tesla drops below $200, analyze it and notify me`\n"
+            "• `/workflow Every morning scrape crypto news and send summary`\n"
+            "• `/workflow Check gold price every 30 minutes, if above $2500 alert me`\n"
+            "• `/workflow Research this YouTube video and send me the summary: <url>`\n\n"
+            "*Workflow Actions:*\n"
+            "  🧠 AI Analysis • 🕷️ Web Scrape • 📊 Stock Lookup\n"
+            "  📺 YouTube Research • 📬 Send Message • 🌐 HTTP Request\n"
+            "  ⏳ Delay • 🔀 Conditions\n\n"
+            "*Triggers:*\n"
+            "  ⏰ Interval (every N min) • 📈 Price Threshold\n"
+            "  📅 One-time Schedule • 🔘 Manual\n\n"
+            "_The AI will parse your request into an automated pipeline!_",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
-    old_address = user["algo_address"]
-    await disconnect_wallet(tg_id)
+    text = " ".join(context.args)
+    await update.message.reply_text("⚡ _Building your automation workflow with AI…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        parsed = await parse_workflow_from_nl(text, tg_id)
+
+        wf = await create_workflow(
+            tg_id=tg_id,
+            name=parsed.get("name", "Custom Workflow"),
+            description=parsed.get("description", text),
+            trigger_type=parsed.get("trigger_type", "manual"),
+            trigger_config=parsed.get("trigger_config", {}),
+            steps=parsed.get("steps", []),
+        )
+
+        steps_preview = "\n".join(
+            f"  {i+1}. *{s.get('name', 'Step')}* — `{s.get('type', '?')}`"
+            for i, s in enumerate(parsed.get("steps", []))
+        )
+        trigger_str = parsed.get("trigger_type", "manual")
+        trigger_cfg = parsed.get("trigger_config", {})
+        if trigger_str == "interval":
+            trigger_str += f" (every {trigger_cfg.get('interval_minutes', '?')} min)"
+        elif trigger_str == "price_threshold":
+            trigger_str += f" ({trigger_cfg.get('ticker', '?')} {trigger_cfg.get('direction', '?')} ${trigger_cfg.get('threshold', '?')})"
+
+        await update.message.reply_text(
+            f"✅ *Workflow Created!*\n\n"
+            f"📋 *{wf['name']}*\n"
+            f"📝 {wf.get('description', '')[:150]}\n\n"
+            f"🔥 *Trigger:* `{trigger_str}`\n\n"
+            f"📦 *Steps:*\n{steps_preview}\n\n"
+            f"🆔 ID: `{wf['id']}`\n\n"
+            f"• `/run_workflow {wf['id']}` — Run now\n"
+            f"• `/pause_workflow {wf['id']}` — Pause/resume\n"
+            f"• `/delete_workflow {wf['id']}` — Delete\n\n"
+            f"_Active workflows are auto-evaluated every 30 seconds._",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    except Exception as e:
+        logger.error("Workflow creation failed: %s", e)
+        await update.message.reply_text(f"⚠️ Could not create workflow: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"/workflow by user {tg_id}")
+
+
+async def cmd_my_workflows(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    workflows = await get_user_workflows(tg_id)
+
+    if not workflows:
+        await update.message.reply_text(
+            "⚡ No workflows yet. Use `/workflow <description>` to create one!",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = f"⚡ *Your Workflows ({len(workflows)}):*\n\n"
+    for wf in workflows:
+        status_emoji = "🟢" if wf["status"] == "active" else "🟡"
+        runs = wf.get("run_count", 0)
+        last_run = wf.get("last_run_at", "Never")
+        if last_run and last_run != "Never":
+            last_run = last_run[:16].replace("T", " ")
+        text += (
+            f"{status_emoji} *{wf['name']}*\n"
+            f"  Trigger: `{wf['trigger_type']}` | Runs: {runs}\n"
+            f"  Last: {last_run} | ID: `{wf['id']}`\n\n"
+        )
+
+    text += "• `/run_workflow <id>` — Run\n• `/delete_workflow <id>` — Delete"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_run_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("⚡ *Usage:* `/run_workflow <workflow_id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    wf_id = context.args[0]
+    workflows = await get_user_workflows(tg_id)
+    target = next((w for w in workflows if w["id"] == wf_id), None)
+
+    if not target:
+        await update.message.reply_text(f"⚠️ No workflow with ID `{wf_id}`.", parse_mode=ParseMode.MARKDOWN)
+        return
 
     await update.message.reply_text(
-        f"🔓 *Wallet Disconnected*\n\n"
-        f"Removed: `{old_address}`\n\n"
-        f"Use `/connect_wallet` to link a new Lute wallet.",
+        f"▶️ _Running workflow_ `{target['name']}` …\n_This may take a moment._",
         parse_mode=ParseMode.MARKDOWN,
     )
-    log_memory("TelegramBot", f"/disconnect by user {tg_id}, removed {old_address[:16]}…")
 
+    try:
+        result = await execute_workflow(target)
+        status_emoji = "✅" if result["status"] == "completed" else "❌"
 
-async def cmd_reset_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /reset_wallet — force-clear wallet regardless of current state."""
-    tg_id = update.effective_user.id
-    user = await get_user(tg_id)
-    if not user:
-        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
-        return
+        steps_summary = ""
+        for s in result.get("steps_log", []):
+            s_emoji = "✅" if s.get("success") else "❌"
+            steps_summary += f"  {s_emoji} *{s.get('name', 'Step')}*\n    └ {s.get('output_preview', '')[:100]}\n"
 
-    old_address = user.get("algo_address")
-    await disconnect_wallet(tg_id)
-
-    if old_address:
         await update.message.reply_text(
-            f"🗑️ *Wallet Force-Reset*\n\n"
-            f"Cleared: `{old_address}`\n"
-            f"Mnemonic wiped from DB.\n\n"
-            f"You're on a clean slate. Use `/connect_wallet` to link your real Lute wallet.",
+            f"{status_emoji} *Workflow Complete: {target['name']}*\n\n"
+            f"📦 *Steps:*\n{steps_summary}\n"
+            f"🆔 Log: `{result.get('log_id', '?')}`",
             parse_mode=ParseMode.MARKDOWN,
         )
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Execution failed: {str(e)[:200]}")
+
+
+async def cmd_pause_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚡ *Usage:* `/pause_workflow <id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    wf_id = context.args[0]
+    new_status = await toggle_workflow(wf_id)
+    if new_status == "not_found":
+        await update.message.reply_text(f"⚠️ No workflow `{wf_id}` found.", parse_mode=ParseMode.MARKDOWN)
     else:
+        emoji = "🟢" if new_status == "active" else "🟡"
         await update.message.reply_text(
-            "✅ *Wallet already clean* — no address stored.\n\n"
-            "Use `/connect_wallet` to link your Lute wallet.",
+            f"{emoji} Workflow `{wf_id}` is now `{new_status}`.",
             parse_mode=ParseMode.MARKDOWN,
         )
-    log_memory("TelegramBot", f"/reset_wallet by user {tg_id}")
+
+
+async def cmd_delete_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚡ *Usage:* `/delete_workflow <id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    wf_id = context.args[0]
+    deleted = await delete_workflow(wf_id)
+    if deleted:
+        await update.message.reply_text(f"🗑️ Workflow `{wf_id}` deleted.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(f"⚠️ No workflow with ID `{wf_id}`.", parse_mode=ParseMode.MARKDOWN)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /schedule — Automated Scheduled Messages
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📬 *Schedule Automated Messages*\n\n"
+            "Describe your schedule in plain English!\n\n"
+            "*Examples:*\n"
+            "• `/schedule Remind me to check stocks in 30 minutes`\n"
+            "• `/schedule Every hour tell me to take a break`\n"
+            "• `/schedule Every morning at 9am send market opening reminder`\n"
+            "• `/schedule In 2 hours remind me about the meeting`\n\n"
+            "_AI will parse your timing and set it up!_",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = " ".join(context.args)
+    await update.message.reply_text("📬 _Parsing your schedule with AI…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        parsed = await parse_scheduled_message_nl(text)
+
+        msg = await create_scheduled_message(
+            tg_id=tg_id,
+            message=parsed.get("message", text),
+            run_at=parsed.get("run_at"),
+            repeat=parsed.get("repeat", False),
+            repeat_interval_min=parsed.get("repeat_interval_min", 0),
+        )
+
+        repeat_str = "🔁 Recurring" if parsed.get("repeat") else "📌 One-time"
+        timing_str = ""
+        if parsed.get("run_at"):
+            timing_str = f"⏰ Scheduled: `{parsed['run_at'][:16]}`\n"
+        if parsed.get("repeat") and parsed.get("repeat_interval_min"):
+            timing_str += f"🔄 Every `{parsed['repeat_interval_min']}` minutes\n"
+
+        await update.message.reply_text(
+            f"✅ *Message Scheduled!*\n\n"
+            f"📝 Message: _{msg['message'][:100]}_\n"
+            f"{timing_str}"
+            f"📋 Type: {repeat_str}\n"
+            f"🆔 ID: `{msg['id']}`\n\n"
+            f"• `/my_schedules` — View all\n"
+            f"• `/delete_schedule {msg['id']}` — Cancel",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not parse schedule: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"/schedule by user {tg_id}")
+
+
+async def cmd_my_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    messages = await get_user_scheduled_messages(tg_id)
+
+    if not messages:
+        await update.message.reply_text(
+            "📬 No scheduled messages. Use `/schedule <description>` to create one!",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = f"📬 *Your Scheduled Messages ({len(messages)}):*\n\n"
+    for m in messages:
+        status_emoji = {"active": "🟢", "delivered": "✅", "cancelled": "🔴"}.get(m["status"], "⚪")
+        repeat_str = "🔁" if m.get("repeat") else "📌"
+        text += (
+            f"{status_emoji} {repeat_str} _{m['message'][:60]}_\n"
+            f"  Runs: {m.get('run_count', 0)} | Status: `{m['status']}`\n"
+            f"  ID: `{m['id']}`\n\n"
+        )
+
+    text += "Delete with `/delete_schedule <id>`"
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_delete_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("📬 *Usage:* `/delete_schedule <id>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    msg_id = context.args[0]
+    deleted = await delete_scheduled_message(msg_id)
+    if deleted:
+        await update.message.reply_text(f"🗑️ Scheduled message `{msg_id}` deleted.", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(f"⚠️ No scheduled message with ID `{msg_id}`.", parse_mode=ParseMode.MARKDOWN)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /chat — Force Swarm Chat
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "🧠 *Usage:* `/chat <your message>`\n\n"
+            "Or just type anything without a command — the AI will respond!",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    text = " ".join(context.args)
+    await _swarm_chat(update, tg_id, text)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  /analyze <asset> — AI Swarm Analysis
+# ═══════════════════════════════════════════════════════════════════
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /analyze <asset> — trigger AI Swarm analysis."""
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
@@ -288,11 +763,16 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        input_text = f"Analyze {asset} — provide current price, trend analysis, support/resistance levels, and a clear trading recommendation."
-        verdict = await run_swarm(
-            text_data=input_text,
-            user_command=f"Analyze {asset} for trading",
+        # First get real-time stock data
+        stock_data = await _fetch_stock_data(asset)
+
+        input_text = (
+            f"Analyze {asset} for trading.\n\n"
+            f"REAL-TIME DATA:\n{stock_data}\n\n"
+            f"Based on this live data, provide: trend analysis, support/resistance levels, "
+            f"key metrics assessment, and a clear trading recommendation."
         )
+        verdict = await run_swarm(text_data=input_text, user_command=f"Analyze {asset}")
 
         sd = verdict.get("structured_data", {})
         summary = sd.get("summary", "No summary generated.")
@@ -318,8 +798,12 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reasoning:
             response += f"🧠 *Reasoning:* _{reasoning[:200]}_\n\n"
 
+        # Include live price data
+        response += f"━━━━━━━━━━━━━━━\n📊 *Live Data:*\n{stock_data}\n"
+
         await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
 
+        # Auto-monitor logic
         trade_decision = verdict.get("trade_decision", decision)
         target_price = verdict.get("target_entry_price")
         asset_ticker = verdict.get("asset_ticker", asset)
@@ -337,12 +821,9 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await update.message.reply_text(
                     f"📡 *Auto-Monitor Created*\n\n"
-                    f"Asset: `{asset_ticker}`\n"
-                    f"Target: `${float(target_price):.2f}`\n"
-                    f"Allocation: `${alloc:.2f}`\n"
-                    f"Check Interval: Every 5 min\n"
-                    f"Job ID: `{job_id}`\n\n"
-                    f"_I'll auto-execute the trade and notify you when the price hits target._",
+                    f"Asset: `{asset_ticker}` | Target: `${float(target_price):.2f}`\n"
+                    f"Allocation: `${alloc:.2f}` | Job: `{job_id}`\n\n"
+                    f"_I'll auto-execute and notify you when target hits._",
                     parse_mode=ParseMode.MARKDOWN,
                 )
 
@@ -356,10 +837,8 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pos = await open_position(tg_id, asset_ticker, alloc, current_price)
                         await update.message.reply_text(
                             f"✅ *Trade Executed!*\n\n"
-                            f"Asset: `{asset_ticker}`\n"
-                            f"Entry: `${current_price:.2f}`\n"
-                            f"Allocated: `${alloc:.2f}`\n"
-                            f"Position ID: `{pos['id']}`\n\n"
+                            f"Asset: `{asset_ticker}` | Entry: `${current_price:.2f}`\n"
+                            f"Allocated: `${alloc:.2f}` | ID: `{pos['id']}`\n\n"
                             f"Use `/close {pos['id']}` to close.",
                             parse_mode=ParseMode.MARKDOWN,
                         )
@@ -373,8 +852,103 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_memory("TelegramBot", f"/analyze {asset} by user {tg_id}")
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  WALLET & TRADING COMMANDS (preserved)
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    wallet_url = f"{WEBAPP_URL}?mode=connect&_t={int(_time.time())}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="🔗 Open Wallet Connector", web_app=WebAppInfo(url=wallet_url))],
+    ])
+
+    if user.get("algo_address"):
+        await update.message.reply_text(
+            f"🔗 *Current Wallet*\n\nAddress: `{user['algo_address']}`\n\n"
+            f"Tap below to *update*, or `/disconnect` to remove.",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+        )
+    else:
+        await update.message.reply_text(
+            "🔗 *Connect Algorand Wallet*\n\nTap below to connect via Lute Wallet.",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+        )
+
+
+async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    raw_data = update.effective_message.web_app_data.data
+    try:
+        payload = json.loads(raw_data)
+        address = payload.get("address", "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        address = raw_data.strip()
+
+    if not address or len(address) < 20:
+        await update.message.reply_text("⚠️ Invalid wallet address.")
+        return
+
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await link_wallet(tg_id, address, "lute-external-wallet")
+    await update.message.reply_text(
+        f"✅ *Wallet Connected!*\n\n📬 `{address}`\n\n"
+        f"💧 [Fund on TestNet](https://bank.testnet.algorand.network/)",
+        parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+    )
+
+
+async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+    if not user.get("algo_address"):
+        await update.message.reply_text("ℹ️ No wallet connected.", parse_mode=ParseMode.MARKDOWN)
+        return
+    old = user["algo_address"]
+    await disconnect_wallet(tg_id)
+    await update.message.reply_text(f"🔓 Wallet `{old}` disconnected.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_reset_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+    await disconnect_wallet(tg_id)
+    await update.message.reply_text("🗑️ Wallet force-reset. Use `/connect_wallet` to relink.", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    transact_url = f"{WEBAPP_URL}?mode=transact&_t={int(_time.time())}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(text="⚡ Open Algorand Bridge", web_app=WebAppInfo(url=transact_url))],
+    ])
+    await update.message.reply_text(
+        "🌐 *Algorand Web3 Bridge*\n\nTap to connect Lute Wallet & sign transactions.",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+    )
+
+
 async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /portfolio — show balance + positions + monitors."""
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
@@ -387,65 +961,57 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     monitors = get_user_monitors(tg_id)
     all_positions = await get_all_positions(tg_id)
     closed = [p for p in all_positions if p["status"] == "closed"]
+    workflows = await get_user_workflows(tg_id)
+    schedules = await get_user_scheduled_messages(tg_id)
 
-    text = (
-        f"💼 *X10V Portfolio*\n\n"
-        f"💰 *Balance:* `${balance:.2f}`\n"
-        f"🔗 *Wallet:* `{wallet[:16]}…`\n\n" if wallet else
-        f"💼 *X10V Portfolio*\n\n"
-        f"💰 *Balance:* `${balance:.2f}`\n"
-        f"🔗 *Wallet:* Not connected\n\n"
-    )
+    text = f"💼 *X10V Portfolio*\n\n"
+    text += f"💰 *Balance:* `${balance:.2f}`\n"
+    text += f"🔗 *Wallet:* `{wallet[:16]}…`\n\n" if wallet else "🔗 *Wallet:* Not connected\n\n"
 
+    # Positions
     if positions:
         text += f"📈 *Open Positions ({len(positions)}):*\n"
         for p in positions:
-            text += (
-                f"  • `{p['asset']}` — ${p['amount_usd']:.2f} @ ${p['entry_price']:.2f}\n"
-                f"    ID: `{p['id']}` | Opened: {p['opened_at'][:10]}\n"
-            )
+            text += f"  • `{p['asset']}` — ${p['amount_usd']:.2f} @ ${p['entry_price']:.2f}\n"
         text += "\n"
     else:
         text += "📈 *Open Positions:* None\n\n"
 
+    # Monitors
     if monitors:
-        text += f"📡 *Active Monitors ({len(monitors)}):*\n"
-        for m in monitors:
-            text += f"  • `{m['asset']}` target $`{m['target_price']:.2f}` — Job: `{m['job_id']}`\n"
-        text += "\n"
+        text += f"📡 *Monitors ({len(monitors)}):* Active\n"
 
+    # PnL
     if closed:
         total_pnl = sum(p.get("pnl", 0) for p in closed)
         emoji = "🟢" if total_pnl >= 0 else "🔴"
-        text += f"📊 *Closed Trades:* {len(closed)} | {emoji} Total PnL: `${total_pnl:+.2f}`\n"
+        text += f"📊 *Closed Trades:* {len(closed)} | {emoji} PnL: `${total_pnl:+.2f}`\n"
+
+    # Automations summary
+    active_wf = len([w for w in workflows if w.get("status") == "active"])
+    active_sched = len([s for s in schedules if s.get("status") == "active"])
+    text += f"\n⚡ *Automations:* {active_wf} workflows | {active_sched} scheduled msgs"
 
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /close <position_id> — close a paper trade."""
     tg_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text(
-            "📊 *Usage:* `/close <position_id>`\n\nFind your position ID with `/portfolio`.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text("📊 *Usage:* `/close <position_id>`", parse_mode=ParseMode.MARKDOWN)
         return
 
     pos_id = context.args[0]
     positions = await get_open_positions(tg_id)
     target = next((p for p in positions if p["id"] == pos_id), None)
-
     if not target:
-        await update.message.reply_text(f"⚠️ No open position with ID `{pos_id}`.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠️ No open position `{pos_id}`.", parse_mode=ParseMode.MARKDOWN)
         return
 
     asset = target["asset"]
-    await update.message.reply_text(f"🔄 Fetching current price for `{asset}` …", parse_mode=ParseMode.MARKDOWN)
-
     current_price = await fetch_current_price(asset)
     if current_price is None:
-        await update.message.reply_text(f"⚠️ Could not fetch current price for `{asset}`. Try again later.")
+        await update.message.reply_text(f"⚠️ Could not fetch price for `{asset}`.")
         return
 
     try:
@@ -454,10 +1020,8 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = "🟢" if pnl >= 0 else "🔴"
         await update.message.reply_text(
             f"✅ *Position Closed*\n\n"
-            f"Asset: `{asset}`\n"
-            f"Entry: `${result['entry_price']:.2f}` → Exit: `${current_price:.2f}`\n"
-            f"{emoji} PnL: `${pnl:+.2f}`\n\n"
-            f"Updated balance in `/portfolio`.",
+            f"`{asset}`: ${result['entry_price']:.2f} → ${current_price:.2f}\n"
+            f"{emoji} PnL: `${pnl:+.2f}`",
             parse_mode=ParseMode.MARKDOWN,
         )
     except ValueError as e:
@@ -465,139 +1029,62 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_monitors(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /monitors — list active price monitors."""
     tg_id = update.effective_user.id
     monitors = get_user_monitors(tg_id)
-
     if not monitors:
-        await update.message.reply_text("📡 No active price monitors. Use `/analyze` to create one.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("📡 No active monitors.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    text = f"📡 *Active Price Monitors ({len(monitors)}):*\n\n"
+    text = f"📡 *Active Monitors ({len(monitors)}):*\n\n"
     for m in monitors:
-        text += (
-            f"• `{m['asset']}` → Target: `${m['target_price']:.2f}`\n"
-            f"  Allocation: `${m['allocation_usd']:.2f}` | Dir: {m['direction']}\n"
-            f"  Job: `{m['job_id']}` | Since: {m['created_at'][:10]}\n\n"
-        )
-    text += "Cancel with `/cancel <job_id>`"
+        text += f"• `{m['asset']}` → $`{m['target_price']:.2f}` | Job: `{m['job_id']}`\n"
+    text += "\nCancel with `/cancel <job_id>`"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /cancel <job_id> — cancel a price monitor."""
     if not context.args:
         await update.message.reply_text("📡 *Usage:* `/cancel <job_id>`", parse_mode=ParseMode.MARKDOWN)
         return
-
-    job_id = context.args[0]
-    success = cancel_monitor(job_id)
+    success = cancel_monitor(context.args[0])
     if success:
-        await update.message.reply_text(f"✅ Monitor `{job_id}` cancelled.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"✅ Monitor `{context.args[0]}` cancelled.", parse_mode=ParseMode.MARKDOWN)
     else:
-        await update.message.reply_text(f"⚠️ No active monitor with ID `{job_id}`.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠️ No monitor `{context.args[0]}`.", parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /transact — open the Telegram Mini App for Algorand Web3 transactions."""
+# ═══════════════════════════════════════════════════════════════════
+#  RULE ENGINE COMMANDS
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_set_rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
         await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    transact_url = f"{WEBAPP_URL}?mode=transact&_t={int(_time.time())}"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            text="⚡ Open Algorand Bridge",
-            web_app=WebAppInfo(url=transact_url),
-        )],
-    ])
-
-    await update.message.reply_text(
-        "🌐 *X10V Web3 Bridge*\n\n"
-        "Tap below to open the Algorand Mini App.\n"
-        "Connect your *Lute Wallet*, view your TestNet balance, "
-        "and sign transactions — all inside Telegram.\n\n"
-        "_Powered by Algorand TestNet + Lute Wallet_",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard,
-    )
-    log_memory("TelegramBot", f"/transact by user {tg_id}")
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /help — show all available commands."""
-    text = (
-        "🤖 *X10V Autonomous Trading Bot*\n\n"
-        "*Commands:*\n"
-        "  /start — Create profile ($1,000 demo)\n"
-        "  /connect\\_wallet — Connect Lute wallet via Mini App\n"
-        "  /disconnect — Remove linked wallet\n"
-        "  /reset\\_wallet — Force-clear wallet (clean slate)\n"
-        "  /analyze `<asset>` — AI Swarm analysis\n"
-        "  /transact — Open Web3 Bridge (Lute Wallet)\n"
-        "  /portfolio — Balance & positions\n"
-        "  /close `<id>` — Close a paper trade\n"
-        "  /monitors — Active price watchers\n"
-        "  /cancel `<job_id>` — Stop a monitor\n"
-        "  /set\\_rule `<rule>` — Create automation rule\n"
-        "  /my\\_rules — View all your rules\n"
-        "  /delete\\_rule `<id>` — Remove a rule\n"
-        "  /suggest — AI-powered smart suggestions\n"
-        "  /mock\\_trade `<asset> <amount>` — Execute mock Groww trade\n"
-        "  /trade\\_history — View Groww mock trade log\n"
-        "  /help — This message\n\n"
-        "*How it works:*\n"
-        "1️⃣ `/analyze XAU/USD` triggers the Gemini AI Swarm\n"
-        "2️⃣ If the swarm says 'monitor\\_and\\_execute', a background job watches the price every 5 min\n"
-        "3️⃣ When the target is hit, the bot auto-executes a paper trade and DMs you\n"
-        "4️⃣ `/transact` opens the Web3 Mini App for real Algorand TestNet transactions\n"
-        "5️⃣ `/set_rule` creates dynamic automation rules evaluated every 60s\n"
-        "6️⃣ Voice commands from the web dashboard trigger actions here via Bridge\n\n"
-        "_Powered by Gemini 2.5 Flash + Groq + Algorand + Lute + Groww Mock_"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle free-text messages — route them through the swarm."""
-    tg_id = update.effective_user.id
-    user = await get_user(tg_id)
-    if not user:
-        await update.message.reply_text("⚠️ Send `/start` first!", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    text = update.message.text
-
-    # Check if this looks like a rule-setting natural language command
-    rule_keywords = ["if ", "when ", "rule:", "automate ", "set rule"]
-    if any(text.lower().startswith(kw) or kw in text.lower()[:30] for kw in rule_keywords):
-        await _handle_natural_rule(update, tg_id, text)
-        return
-
-    await update.message.reply_text("🧠 _Processing with AI Swarm …_", parse_mode=ParseMode.MARKDOWN)
-
-    try:
-        verdict = await run_swarm(text_data=text, user_command=text)
-        sd = verdict.get("structured_data", {})
-        summary = sd.get("summary", "No summary.")
-        decision = verdict.get("decision", "inform")
+    if not context.args:
         await update.message.reply_text(
-            f"📋 *Swarm Says:* `{decision}`\n\n{summary}",
+            "⚙️ *Create a Trading Rule*\n\n"
+            "*Usage:* `/set_rule <natural language rule>`\n\n"
+            "*Examples:*\n"
+            "• `/set_rule Buy AAPL if price below 180`\n"
+            "• `/set_rule Sell BTC when RSI above 70`\n"
+            "• `/set_rule Buy gold if RSI below 30 and sentiment is bullish`\n\n"
+            "_Rules are evaluated every 60 seconds._",
             parse_mode=ParseMode.MARKDOWN,
         )
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
+        return
+
+    text = " ".join(context.args)
+    await _handle_natural_rule(update, tg_id, text)
 
 
 async def _handle_natural_rule(update: Update, tg_id: int, text: str):
-    """Parse natural language into a trading rule via Groq."""
     await update.message.reply_text("⚙️ _Parsing your rule with AI…_", parse_mode=ParseMode.MARKDOWN)
-
     try:
         from groq import Groq
-        import os
         groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
         prompt = f"""Parse this trading rule into JSON:
@@ -622,17 +1109,14 @@ Return ONLY valid JSON:
         resp = groq.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=300,
+            temperature=0.1, max_tokens=300,
         )
         raw = resp.choices[0].message.content
         json_start = raw.find('{')
         json_end = raw.rfind('}') + 1
         parsed = json.loads(raw[json_start:json_end])
 
-        # Clean null values from conditions
         conditions = {k: v for k, v in parsed.get("conditions", {}).items() if v is not None}
-
         rule = await DynamicRuleEngine.create_rule(
             tg_id=tg_id,
             name=parsed.get("name", "Custom Rule"),
@@ -645,104 +1129,59 @@ Return ONLY valid JSON:
         conditions_str = json.dumps(conditions, indent=2)
         await update.message.reply_text(
             f"✅ *Rule Created!*\n\n"
-            f"📋 Name: `{rule['name']}`\n"
-            f"📊 Asset: `{rule['asset']}`\n"
+            f"📋 `{rule['name']}` | Asset: `{rule['asset']}`\n"
             f"⚙️ Conditions:\n```\n{conditions_str}\n```\n"
-            f"💰 Action: `{rule['action_type']}` $`{rule['amount_usd']:.2f}`\n"
-            f"🆔 Rule ID: `{rule['id']}`\n\n"
-            f"_This rule is evaluated every 60 seconds. Trades execute via Groww Mock._",
+            f"💰 Action: `{rule['action_type']}` ${rule['amount_usd']:.0f}\n"
+            f"🆔 `{rule['id']}`\n\n"
+            f"_Evaluated every 60 seconds._",
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
         await update.message.reply_text(f"⚠️ Could not parse rule: {str(e)[:200]}")
 
 
-# ═══════════════════════════════════════════════════════
-#  Rule Engine Commands
-# ═══════════════════════════════════════════════════════
-
-async def cmd_set_rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /set_rule — create a dynamic trading rule."""
-    tg_id = update.effective_user.id
-    user = await get_user(tg_id)
-    if not user:
-        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "⚙️ *Create a Trading Rule*\n\n"
-            "*Usage:* `/set_rule <natural language rule>`\n\n"
-            "*Examples:*\n"
-            "• `/set_rule Buy AAPL if price below 180`\n"
-            "• `/set_rule Sell BTC when RSI above 70`\n"
-            "• `/set_rule Buy gold if RSI below 30 and sentiment is bullish`\n\n"
-            "_Or just type a rule in plain text like:_\n"
-            "\"If AAPL drops below 175, buy $200 worth\"",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    text = " ".join(context.args)
-    await _handle_natural_rule(update, tg_id, text)
-
-
 async def cmd_my_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /my_rules — list all user rules."""
     tg_id = update.effective_user.id
     rules = await DynamicRuleEngine.get_user_rules(tg_id)
-
     if not rules:
-        await update.message.reply_text(
-            "📋 No rules yet. Use `/set_rule` to create one.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text("📋 No rules. Use `/set_rule`.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    text = f"⚙️ *Your Trading Rules ({len(rules)}):*\n\n"
+    text = f"⚙️ *Your Rules ({len(rules)}):*\n\n"
     for r in rules:
-        conditions = json.loads(r["conditions"]) if isinstance(r["conditions"], str) else r["conditions"]
         status_emoji = "🟢" if r["status"] == "active" else "🟡"
         text += (
-            f"{status_emoji} *{r['name']}*\n"
-            f"  Asset: `{r['asset']}` | Action: `{r['action_type']}` $`{r['amount_usd']:.0f}`\n"
+            f"{status_emoji} *{r['name']}* — `{r['asset']}` `{r['action_type']}`\n"
             f"  Triggered: {r['trigger_count']}x | ID: `{r['id']}`\n\n"
         )
-
-    text += "Delete with `/delete_rule <id>`"
+    text += "Delete: `/delete_rule <id>`"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_delete_rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /delete_rule — remove a rule."""
     if not context.args:
-        await update.message.reply_text("⚙️ *Usage:* `/delete_rule <rule_id>`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("⚙️ *Usage:* `/delete_rule <id>`", parse_mode=ParseMode.MARKDOWN)
         return
-
-    rule_id = context.args[0]
-    await DynamicRuleEngine.delete_rule(rule_id)
-    await update.message.reply_text(f"🗑️ Rule `{rule_id}` deleted.", parse_mode=ParseMode.MARKDOWN)
+    await DynamicRuleEngine.delete_rule(context.args[0])
+    await update.message.reply_text(f"🗑️ Rule `{context.args[0]}` deleted.", parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_suggest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /suggest — AI-powered smart suggestions based on user's rules and trades."""
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
         await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    await update.message.reply_text("🧠 _Analyzing your rules and trades…_", parse_mode=ParseMode.MARKDOWN)
-
+    await update.message.reply_text("🧠 _Analyzing your profile…_", parse_mode=ParseMode.MARKDOWN)
     try:
         suggestions = await get_smart_suggestions(tg_id)
         await update.message.reply_text(suggestions, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Could not generate suggestions: {str(e)[:200]}")
+        await update.message.reply_text(f"⚠️ {str(e)[:200]}")
 
 
 async def cmd_mock_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /mock_trade — execute a Groww mock trade manually."""
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
@@ -751,12 +1190,9 @@ async def cmd_mock_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(context.args) < 2:
         await update.message.reply_text(
-            "💹 *Groww Mock Trade*\n\n"
-            "*Usage:* `/mock_trade <asset> <amount>`\n\n"
-            "*Examples:*\n"
+            "💹 *Usage:* `/mock_trade <asset> <amount>`\n\n"
             "• `/mock_trade AAPL 200`\n"
-            "• `/mock_trade BTC 500`\n"
-            "• `/mock_trade RELIANCE 150`",
+            "• `/mock_trade BTC 500`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -765,105 +1201,262 @@ async def cmd_mock_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(context.args[1])
     except ValueError:
-        await update.message.reply_text("⚠️ Invalid amount. Use a number like `200`.")
+        await update.message.reply_text("⚠️ Invalid amount.")
         return
 
-    await update.message.reply_text(f"💹 _Executing mock trade on Groww for `{asset}`…_", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"💹 _Executing mock trade for_ `{asset}` …", parse_mode=ParseMode.MARKDOWN)
 
     price = await fetch_current_price(asset)
     if price is None:
-        price = 100.0  # fallback for demo
-        await update.message.reply_text(f"ℹ️ _Could not fetch live price for {asset}, using $100.00 demo price._", parse_mode=ParseMode.MARKDOWN)
+        price = 100.0
+        await update.message.reply_text(f"ℹ️ _Using $100 demo price for {asset}_", parse_mode=ParseMode.MARKDOWN)
 
     try:
         result = await GrowwMockExecutor.execute_trade(
-            tg_id=tg_id,
-            asset=asset,
-            side="buy",
-            quantity_usd=amount,
-            market_price=price,
+            tg_id=tg_id, asset=asset, side="buy", quantity_usd=amount, market_price=price,
         )
-
         await update.message.reply_text(
-            f"✅ *Groww Mock Trade Filled!*\n\n"
-            f"📋 Order: `{result['order_id']}`\n"
-            f"📊 Asset: `{result['asset']}`\n"
-            f"💰 Amount: `${result['quantity_usd']:.2f}`\n"
-            f"📈 Market: `${result['market_price']:.4f}`\n"
-            f"📈 Filled: `${result['execution_price']:.4f}`\n"
-            f"📉 Slippage: `{result['slippage_pct']:.3f}%`\n"
-            f"💸 Fee: `${result['fee_usd']:.4f}`\n"
-            f"💵 Net Cost: `${result['net_cost']:.2f}`\n\n"
-            f"_Platform: {result['platform']}_",
+            f"✅ *Mock Trade Filled!*\n\n"
+            f"📋 `{result['order_id']}` | `{result['asset']}`\n"
+            f"💰 ${result['quantity_usd']:.2f} @ ${result['execution_price']:.4f}\n"
+            f"📉 Slip: {result['slippage_pct']:.3f}% | Fee: ${result['fee_usd']:.4f}\n"
+            f"💵 Net: ${result['net_cost']:.2f}",
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Mock trade failed: {str(e)[:200]}")
+        await update.message.reply_text(f"⚠️ Trade failed: {str(e)[:200]}")
 
 
 async def cmd_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /trade_history — view Groww mock trade log."""
     tg_id = update.effective_user.id
     trades = await GrowwMockExecutor.get_trade_history(tg_id)
-
     if not trades:
-        await update.message.reply_text(
-            "💹 No mock trades yet. Use `/mock_trade` or set rules with `/set_rule`.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await update.message.reply_text("💹 No trades yet. Use `/mock_trade`.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    text = f"💹 *Groww Mock Trade History ({len(trades)}):*\n\n"
+    text = f"💹 *Trade History ({len(trades)}):*\n\n"
     for t in trades[:10]:
         text += (
-            f"📋 `{t['order_id']}`\n"
-            f"  {t['side'].upper()} `{t['asset']}` — ${t['quantity_usd']:.2f} @ ${t['execution_price']:.4f}\n"
-            f"  Slip: {t['slippage_pct']:.3f}% | Fee: ${t['fee_usd']:.4f} | {t['executed_at'][:10]}\n\n"
+            f"📋 {t['side'].upper()} `{t['asset']}` — ${t['quantity_usd']:.2f} @ ${t['execution_price']:.4f}\n"
+            f"  {t['executed_at'][:10]} | Slip: {t['slippage_pct']:.3f}%\n\n"
         )
-
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+
+# ═══════════════════════════════════════════════════════════════════
+#  INTELLIGENT FREE-TEXT HANDLER (3-LLM Swarm + Intent Detection)
+# ═══════════════════════════════════════════════════════════════════
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Master handler for all non-command text messages.
+    Uses intelligent routing:
+      1. Detect if it's a rule/schedule/workflow/stock request
+      2. Route to appropriate handler
+      3. Default: Full 3-LLM swarm chat
+    """
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Send `/start` first!", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    text = update.message.text.strip()
+    lower = text.lower()
+
+    # Intent detection patterns
+    rule_keywords = ["if ", "when ", "rule:", "automate ", "set rule"]
+    schedule_keywords = ["remind me", "every hour", "every day", "every morning", "schedule", "in 30 min", "in 1 hour", "recurring"]
+    workflow_keywords = ["workflow:", "create workflow", "automation:", "pipeline:"]
+    stock_keywords = ["price of", "stock price", "how is", "what's the price", "ticker"]
+
+    # Route to appropriate handler
+    if any(kw in lower for kw in rule_keywords):
+        await _handle_natural_rule(update, tg_id, text)
+    elif any(kw in lower for kw in schedule_keywords):
+        await _handle_natural_schedule(update, tg_id, text)
+    elif any(kw in lower for kw in workflow_keywords):
+        await _handle_natural_workflow(update, tg_id, text)
+    elif any(kw in lower for kw in stock_keywords):
+        # Extract potential ticker and fetch stock data
+        await _handle_stock_query(update, text)
+    else:
+        # Default: 3-LLM Swarm chat
+        await _swarm_chat(update, tg_id, text)
+
+
+async def _swarm_chat(update: Update, tg_id: int, text: str):
+    """Route any text through the full Alpha→Beta→Gamma swarm."""
+    await update.message.reply_text(
+        "🧠 _Processing with AI Swarm…_\n_Alpha → Beta → Gamma_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    try:
+        verdict = await run_swarm(text_data=text, user_command=text)
+        sd = verdict.get("structured_data", {})
+        summary = sd.get("summary", "No summary.")
+        metrics = sd.get("timeline_or_metrics", [])
+        decision = verdict.get("decision", "inform")
+        domain = verdict.get("domain", "general")
+
+        decision_emoji = {"inform": "📋", "execute": "✅", "abort": "🛑"}.get(decision, "❓")
+        response = f"{decision_emoji} *Swarm ({domain}):*\n\n{summary}\n\n"
+
+        if metrics:
+            response += "📊 *Details:*\n"
+            for m in metrics[:6]:
+                response += f"  • *{m.get('key', '')}:* {m.get('value', '')}\n"
+
+        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"Chat by user {tg_id}: {text[:50]}")
+
+
+async def _handle_natural_schedule(update: Update, tg_id: int, text: str):
+    """Parse natural language into scheduled message."""
+    await update.message.reply_text("📬 _Setting up your scheduled message…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        parsed = await parse_scheduled_message_nl(text)
+        msg = await create_scheduled_message(
+            tg_id=tg_id,
+            message=parsed.get("message", text),
+            run_at=parsed.get("run_at"),
+            repeat=parsed.get("repeat", False),
+            repeat_interval_min=parsed.get("repeat_interval_min", 0),
+        )
+        repeat_str = "🔁 Recurring" if parsed.get("repeat") else "📌 One-time"
+        await update.message.reply_text(
+            f"✅ *Scheduled!*\n\n📝 _{msg['message'][:80]}_\n📋 {repeat_str}\n🆔 `{msg['id']}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not schedule: {str(e)[:200]}")
+
+
+async def _handle_natural_workflow(update: Update, tg_id: int, text: str):
+    """Parse natural language into workflow."""
+    await update.message.reply_text("⚡ _Building automation workflow…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        parsed = await parse_workflow_from_nl(text, tg_id)
+        wf = await create_workflow(
+            tg_id=tg_id,
+            name=parsed.get("name", "Auto Workflow"),
+            description=parsed.get("description", text),
+            trigger_type=parsed.get("trigger_type", "manual"),
+            trigger_config=parsed.get("trigger_config", {}),
+            steps=parsed.get("steps", []),
+        )
+        await update.message.reply_text(
+            f"✅ *Workflow Created!*\n\n📋 *{wf['name']}*\n🔥 Trigger: `{wf['trigger_type']}`\n🆔 `{wf['id']}`\n\n"
+            f"Run: `/run_workflow {wf['id']}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not create workflow: {str(e)[:200]}")
+
+
+async def _handle_stock_query(update: Update, text: str):
+    """Handle natural language stock queries."""
+    await update.message.reply_text("📊 _Fetching stock data…_", parse_mode=ParseMode.MARKDOWN)
+
+    try:
+        # Use Groq to extract ticker from natural language
+        from groq import Groq
+        groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        resp = groq.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": f"Extract the stock/crypto ticker symbol from this text. Return ONLY the ticker symbol (e.g., AAPL, BTC-USD, RELIANCE.NS). Text: \"{text}\""}],
+            temperature=0.1, max_tokens=20,
+        )
+        ticker = resp.choices[0].message.content.strip().upper()
+        ticker = re.sub(r'[^A-Z0-9.\-^/=]', '', ticker)
+
+        if ticker:
+            data = await _fetch_stock_data(ticker)
+            await update.message.reply_text(data, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("⚠️ Could not identify a stock ticker.")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ {str(e)[:200]}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  BOT INITIALIZATION & MAIN
+# ═══════════════════════════════════════════════════════════════════
 
 async def post_init(application):
     """Set bot commands in the Telegram UI menu."""
     commands = [
         BotCommand("start", "Create profile ($1,000 demo)"),
-        BotCommand("connect_wallet", "Connect Lute wallet via Mini App"),
-        BotCommand("disconnect", "Remove linked wallet"),
-        BotCommand("reset_wallet", "Force-clear wallet (clean slate)"),
-        BotCommand("analyze", "AI Swarm analysis on any asset"),
-        BotCommand("transact", "Open Algorand Web3 Bridge"),
-        BotCommand("portfolio", "View balance & positions"),
-        BotCommand("close", "Close a paper trade"),
-        BotCommand("monitors", "List active price monitors"),
-        BotCommand("cancel", "Cancel a price monitor"),
+        BotCommand("help", "Show all 30+ commands"),
+        BotCommand("stock", "Real-time stock/crypto data"),
+        BotCommand("news", "Web-scraped latest news"),
+        BotCommand("scrape", "Deep web scrape"),
+        BotCommand("research", "YouTube deep research"),
+        BotCommand("chat", "Chat with 3-LLM Swarm"),
+        BotCommand("workflow", "Create n8n-style automation"),
+        BotCommand("my_workflows", "List your workflows"),
+        BotCommand("run_workflow", "Run a workflow"),
+        BotCommand("pause_workflow", "Pause/resume workflow"),
+        BotCommand("delete_workflow", "Delete a workflow"),
+        BotCommand("schedule", "Schedule automated messages"),
+        BotCommand("my_schedules", "List scheduled messages"),
+        BotCommand("delete_schedule", "Delete scheduled message"),
+        BotCommand("analyze", "AI Swarm asset analysis"),
         BotCommand("set_rule", "Create automation rule"),
-        BotCommand("my_rules", "View your trading rules"),
+        BotCommand("my_rules", "View your rules"),
         BotCommand("delete_rule", "Remove a rule"),
-        BotCommand("suggest", "AI-powered smart suggestions"),
-        BotCommand("mock_trade", "Execute Groww mock trade"),
-        BotCommand("trade_history", "View mock trade log"),
-        BotCommand("help", "Show all commands"),
+        BotCommand("suggest", "AI smart suggestions"),
+        BotCommand("mock_trade", "Paper trade on Groww"),
+        BotCommand("trade_history", "View trade log"),
+        BotCommand("portfolio", "Balance & positions"),
+        BotCommand("close", "Close a position"),
+        BotCommand("monitors", "Active price monitors"),
+        BotCommand("cancel", "Cancel a monitor"),
+        BotCommand("connect_wallet", "Link Lute wallet"),
+        BotCommand("transact", "Algorand Web3 Bridge"),
+        BotCommand("disconnect", "Remove wallet"),
+        BotCommand("reset_wallet", "Force-clear wallet"),
     ]
     await application.bot.set_my_commands(commands)
-    logger.info("✅ Bot commands registered in Telegram UI")
+    logger.info("✅ Bot commands registered (30 commands)")
 
 
 def main():
+    global _bot_app
+
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN not set in .env — exiting.")
+        logger.error("❌ TELEGRAM_BOT_TOKEN not set — exiting.")
         return
 
+    # Initialize automation DB
+    import asyncio as _aio
+    loop = _aio.new_event_loop()
+    loop.run_until_complete(init_automation_db())
+    loop.close()
+
+    # Wire up notify callbacks
     set_tg_notify(tg_notify)
     set_rule_notify(tg_notify)
+    set_automation_notify(tg_notify)
+
+    # Start market monitor scheduler
     start_monitor_scheduler()
 
-    # Start rule engine evaluation loop (every 60 seconds)
+    # Start rule engine (60s) + workflow engine (30s) + message scheduler (30s)
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    rule_scheduler = AsyncIOScheduler()
-    rule_scheduler.add_job(evaluate_all_rules, "interval", seconds=60, id="rule_engine_tick")
-    rule_scheduler.start()
-    logger.info("⚙️ Rule engine scheduler started (60s interval)")
+    automation_scheduler = AsyncIOScheduler()
+    automation_scheduler.add_job(evaluate_all_rules, "interval", seconds=60, id="rule_engine_tick")
+    automation_scheduler.add_job(evaluate_workflows, "interval", seconds=30, id="workflow_engine_tick")
+    automation_scheduler.add_job(evaluate_scheduled_messages, "interval", seconds=30, id="message_scheduler_tick")
+    automation_scheduler.start()
+    logger.info("⚡ Automation scheduler started: rules(60s) + workflows(30s) + messages(30s)")
 
     app = (
         ApplicationBuilder()
@@ -873,29 +1466,60 @@ def main():
         .write_timeout(30)
         .build()
     )
+    _bot_app = app
 
+    # ─── Register all command handlers ───
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("connect_wallet", cmd_connect_wallet))
-    app.add_handler(CommandHandler("disconnect", cmd_disconnect))
-    app.add_handler(CommandHandler("reset_wallet", cmd_reset_wallet))
+    app.add_handler(CommandHandler("help", cmd_help))
+
+    # AI & Data
+    app.add_handler(CommandHandler("chat", cmd_chat))
+    app.add_handler(CommandHandler("stock", cmd_stock))
+    app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("scrape", cmd_scrape))
+    app.add_handler(CommandHandler("research", cmd_research))
+
+    # Automation Workflows
+    app.add_handler(CommandHandler("workflow", cmd_workflow))
+    app.add_handler(CommandHandler("my_workflows", cmd_my_workflows))
+    app.add_handler(CommandHandler("run_workflow", cmd_run_workflow))
+    app.add_handler(CommandHandler("pause_workflow", cmd_pause_workflow))
+    app.add_handler(CommandHandler("delete_workflow", cmd_delete_workflow))
+
+    # Scheduled Messages
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("my_schedules", cmd_my_schedules))
+    app.add_handler(CommandHandler("delete_schedule", cmd_delete_schedule))
+
+    # Trading
     app.add_handler(CommandHandler("analyze", cmd_analyze))
-    app.add_handler(CommandHandler("transact", cmd_transact))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("close", cmd_close))
     app.add_handler(CommandHandler("monitors", cmd_monitors))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+
+    # Rules
     app.add_handler(CommandHandler("set_rule", cmd_set_rule))
     app.add_handler(CommandHandler("my_rules", cmd_my_rules))
     app.add_handler(CommandHandler("delete_rule", cmd_delete_rule))
     app.add_handler(CommandHandler("suggest", cmd_suggest))
     app.add_handler(CommandHandler("mock_trade", cmd_mock_trade))
     app.add_handler(CommandHandler("trade_history", cmd_trade_history))
-    app.add_handler(CommandHandler("help", cmd_help))
+
+    # Wallet
+    app.add_handler(CommandHandler("connect_wallet", cmd_connect_wallet))
+    app.add_handler(CommandHandler("disconnect", cmd_disconnect))
+    app.add_handler(CommandHandler("reset_wallet", cmd_reset_wallet))
+    app.add_handler(CommandHandler("transact", cmd_transact))
+
+    # Free-text & Web App Data
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("=" * 60)
-    logger.info("  X10V Telegram Bot — Starting polling")
+    logger.info("  X10V Ultimate Automation Bot — 30 commands")
+    logger.info("  3-LLM Swarm | Real-Time Stocks | n8n Workflows")
+    logger.info("  Scheduled Messages | Web Scraping | YouTube Research")
     logger.info("=" * 60)
     app.run_polling(drop_pending_updates=True)
 
