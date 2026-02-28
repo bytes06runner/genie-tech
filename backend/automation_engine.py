@@ -5,7 +5,7 @@ A full-featured workflow automation engine inspired by n8n, designed for
 Telegram-native execution. Supports:
 
   • Trigger Nodes  — cron, price_threshold, keyword_match, webhook, time_once
-  • Action Nodes   — send_message, ai_analyze, web_scrape, stock_lookup,
+  • Action Nodes   — send_message, ai_analyze, web_scrape, fetch_rss, stock_lookup,
                      youtube_research, execute_trade, api_call
   • Condition Nodes — if/else branching based on variables
   • Workflow DAG    — multi-step pipelines with variable passing
@@ -266,12 +266,68 @@ async def execute_action_node(action: dict, variables: dict) -> dict:
         elif action_type == "web_scrape":
             from deep_scraper import deep_scrape
             query = _interpolate(config.get("query", ""), variables)
-            scrape_result = await deep_scrape(query, timeout_seconds=8)
+            url_hint = config.get("url", "")
+            logger.info("🕷️ web_scrape action — query=%r, url_hint=%r", query, url_hint)
+            scrape_result = await deep_scrape(query, timeout_seconds=10)
+            scraped_text = scrape_result.get("text", "")
+            scraped_url = scrape_result.get("url", "")
+            logger.info("🕷️ web_scrape result — success=%s, url=%s, chars=%d",
+                        scrape_result.get("success"), scraped_url, len(scraped_text))
             result = {
-                "success": scrape_result.get("success", False),
-                "output": scrape_result.get("text", "")[:1500],
-                "url": scrape_result.get("url", ""),
+                "success": scrape_result.get("success", False) and len(scraped_text.strip()) > 20,
+                "output": scraped_text[:1500] if scraped_text.strip() else "No content extracted from page.",
+                "url": scraped_url,
             }
+
+        elif action_type == "fetch_rss":
+            import aiohttp
+            import feedparser
+
+            feed_url = _interpolate(config.get("feed_url", ""), variables)
+            max_items = int(config.get("max_items", 5))
+            logger.info("📰 fetch_rss action — feed_url=%s, max_items=%d", feed_url, max_items)
+
+            # Fetch feed with a modern User-Agent
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            }
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(feed_url, headers=headers,
+                                           timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        raw_feed = await resp.text()
+
+                feed = feedparser.parse(raw_feed)
+                entries = feed.entries[:max_items]
+
+                if not entries:
+                    result = {"success": False, "output": f"RSS feed returned 0 entries: {feed_url}"}
+                else:
+                    items = []
+                    for entry in entries:
+                        title = entry.get("title", "No title")
+                        link = entry.get("link", "")
+                        summary = entry.get("summary", entry.get("description", ""))[:200]
+                        # Strip HTML tags from summary
+                        summary = re.sub(r'<[^>]+>', '', summary).strip()
+                        items.append(f"• {title}\n  {summary}\n  🔗 {link}")
+
+                    output_text = f"📰 Latest {len(items)} items from RSS:\n\n" + "\n\n".join(items)
+                    result = {
+                        "success": True,
+                        "output": output_text,
+                        "titles": [e.get("title", "") for e in entries],
+                        "links": [e.get("link", "") for e in entries],
+                        "item_count": len(entries),
+                    }
+                    logger.info("📰 fetch_rss got %d entries from %s", len(entries), feed_url)
+            except Exception as rss_err:
+                logger.error("📰 fetch_rss failed for %s: %s", feed_url, rss_err)
+                result = {"success": False, "output": f"RSS fetch failed: {str(rss_err)[:200]}"}
 
         elif action_type == "stock_lookup":
             ticker = _interpolate(config.get("ticker", ""), variables)
@@ -463,6 +519,7 @@ async def execute_workflow(workflow: dict) -> dict:
     log_id = f"log_{uuid.uuid4().hex[:10]}"
     now = datetime.now(timezone.utc).isoformat()
     steps_log = []
+    halted_early = False
 
     try:
         for i, step in enumerate(steps):
@@ -472,25 +529,56 @@ async def execute_workflow(workflow: dict) -> dict:
             logger.info("▶️ Workflow %s step %d: %s (%s)", wf_id, i+1, step_name, step_type)
 
             result = await execute_action_node(step, variables)
+            step_success = result.get("success", False)
+            step_output = str(result.get("output", ""))
+
             steps_log.append({
                 "step": i+1, "name": step_name, "type": step_type,
-                "success": result.get("success"), "output_preview": str(result.get("output", ""))[:200],
+                "success": step_success, "output_preview": step_output[:200],
             })
 
             # Store output in variables for next steps
             variables[f"step_{i+1}_output"] = result.get("output", "")
-            variables[f"step_{i+1}_success"] = result.get("success", False)
+            variables[f"step_{i+1}_success"] = step_success
 
             # Handle condition branching
             if step_type == "condition" and not result.get("condition_passed", True):
                 logger.info("⏭️ Condition failed at step %d, skipping remaining steps", i+1)
                 break
 
-            if not result.get("success") and step.get("stop_on_failure", False):
-                logger.warning("⛔ Step %d failed with stop_on_failure=True", i+1)
+            # ── FAIL-SAFE: Halt pipeline on step failure / empty data ──
+            # Data-producing steps (fetch_rss, web_scrape, stock_lookup, ai_analyze,
+            # youtube_research, http_request) must succeed AND return non-empty output
+            # before downstream steps (transform, send_message) can use them.
+            data_producing_types = {
+                "fetch_rss", "web_scrape", "stock_lookup", "ai_analyze",
+                "youtube_research", "http_request",
+            }
+            if step_type in data_producing_types and (not step_success or len(step_output.strip()) < 10):
+                halted_early = True
+                fail_msg = (
+                    f"⚠️ *Workflow halted:* `{workflow.get('name', wf_id)}`\n\n"
+                    f"Step {i+1} *{step_name}* (`{step_type}`) failed or returned empty data.\n"
+                    f"Reason: {step_output[:300] if step_output.strip() else 'No output returned.'}\n\n"
+                    f"Remaining steps were skipped to avoid sending broken data."
+                )
+                logger.warning("⛔ Workflow %s halted at step %d (%s) — data step failed/empty",
+                               wf_id, i+1, step_name)
+                # Send error notification to user
+                if _tg_notify:
+                    try:
+                        await _tg_notify(int(tg_id), fail_msg)
+                    except Exception as notify_err:
+                        logger.error("Failed to send halt notification: %s", notify_err)
                 break
 
-        status = "completed"
+            # Legacy explicit stop_on_failure flag
+            if not step_success and step.get("stop_on_failure", False):
+                logger.warning("⛔ Step %d failed with stop_on_failure=True", i+1)
+                halted_early = True
+                break
+
+        status = "halted" if halted_early else "completed"
     except Exception as e:
         status = "failed"
         logger.error("Workflow %s execution failed: %s", wf_id, e)
@@ -659,7 +747,14 @@ User request: "{text}"
 
 Available action types:
 - "ai_analyze": Run AI swarm analysis. config: {{"prompt": "what to analyze"}}
-- "web_scrape": Scrape web data. config: {{"query": "search query"}}
+- "fetch_rss": Fetch news from an RSS feed (PREFERRED for any news/headlines request). config: {{"feed_url": "https://...", "max_items": 5}}
+  Common RSS feeds:
+    Crypto: "https://cointelegraph.com/rss" or "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    Tech: "https://feeds.arstechnica.com/arstechnica/index" or "https://hnrss.org/frontpage"
+    Finance: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US"
+    AI: "https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml"
+    General: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
+- "web_scrape": Scrape a webpage (use only if no RSS feed is suitable). config: {{"query": "search query"}}
 - "stock_lookup": Get stock data. config: {{"ticker": "AAPL"}}
 - "youtube_research": Analyze YouTube video. config: {{"url": "youtube url"}}
 - "send_message": Send Telegram message. config: {{"message": "text", "tg_id": {tg_id}}}
@@ -667,6 +762,10 @@ Available action types:
 - "condition": Check a condition. config: {{"condition": "expression"}}
 - "delay": Wait. config: {{"seconds": 10}}
 - "transform": Format data. config: {{"template": "text with {{{{variables}}}}"}}
+
+IMPORTANT RULES:
+- For ANY request involving "news", "headlines", or "latest articles", ALWAYS use "fetch_rss" with an appropriate feed URL. Do NOT use "web_scrape" for news.
+- When the workflow fetches data (fetch_rss, stock_lookup, web_scrape), the send_message step should use {{{{step_N_output}}}} to reference that data (where N is the step number that produced it).
 
 Available trigger types:
 - "interval": Repeat every N minutes. config: {{"interval_minutes": 60}}

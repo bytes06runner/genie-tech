@@ -52,13 +52,15 @@ async def _scrape_pipeline(query: str) -> dict:
 
     url = await _find_url(query)
     if not url:
+        logger.warning("🕷️ No URL found for query: %r", query)
         return {"url": "", "text": "No relevant URL found for query.", "success": False}
 
-    logger.info("🔗 Deep scraper target URL: %s", url)
+    logger.info("🔗 Deep scraper target URL: %s (query: %r)", url, query)
 
     text = await _extract_page_text(url)
     if not text:
-        return {"url": url, "text": "Page loaded but no text extracted.", "success": False}
+        logger.warning("🕷️ Page loaded but no text extracted from: %s", url)
+        return {"url": url, "text": f"Page loaded but no text extracted from {url}.", "success": False}
 
     truncated = text[:2000].strip()
     logger.info("📄 Deep scrape extracted %d chars (truncated to %d) from %s", len(text), len(truncated), url)
