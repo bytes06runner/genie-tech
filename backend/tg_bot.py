@@ -571,6 +571,7 @@ async def cmd_my_workflows(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_run_workflow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🚀 cmd_run_workflow invoked by user %s, args=%s", update.effective_user.id, context.args)
     tg_id = update.effective_user.id
     if not context.args:
         await update.message.reply_text("⚡ *Usage:* `/run_workflow <workflow_id>`", parse_mode=ParseMode.MARKDOWN)
@@ -1297,7 +1298,53 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Guard: reject any message starting with / (command that leaked through) ──
     if text.startswith("/"):
-        logger.warning("handle_text received command-like message: %r — ignoring", text[:60])
+        logger.warning("handle_text received command-like message: %r — attempting manual dispatch", text[:80])
+        # Manual dispatch fallback for commands that leaked through filters
+        parts = text.split(maxsplit=1)
+        cmd_name = parts[0].lstrip("/").split("@")[0].lower()  # strip /cmd@BotName
+        _COMMAND_DISPATCH = {
+            "run_workflow": cmd_run_workflow,
+            "my_workflows": cmd_my_workflows,
+            "workflow": cmd_workflow,
+            "pause_workflow": cmd_pause_workflow,
+            "delete_workflow": cmd_delete_workflow,
+            "schedule": cmd_schedule,
+            "my_schedules": cmd_my_schedules,
+            "delete_schedule": cmd_delete_schedule,
+            "set_rule": cmd_set_rule,
+            "my_rules": cmd_my_rules,
+            "delete_rule": cmd_delete_rule,
+            "stock": cmd_stock,
+            "news": cmd_news,
+            "scrape": cmd_scrape,
+            "research": cmd_research,
+            "chat": cmd_chat,
+            "analyze": cmd_analyze,
+            "portfolio": cmd_portfolio,
+            "close": cmd_close,
+            "monitors": cmd_monitors,
+            "cancel": cmd_cancel,
+            "suggest": cmd_suggest,
+            "mock_trade": cmd_mock_trade,
+            "trade_history": cmd_trade_history,
+            "connect_wallet": cmd_connect_wallet,
+            "disconnect": cmd_disconnect,
+            "reset_wallet": cmd_reset_wallet,
+            "transact": cmd_transact,
+            "start": cmd_start,
+            "help": cmd_help,
+        }
+        handler_fn = _COMMAND_DISPATCH.get(cmd_name)
+        if handler_fn:
+            # Inject args manually since we're bypassing CommandHandler
+            if len(parts) > 1:
+                context.args = parts[1].split()
+            else:
+                context.args = []
+            logger.info("Manual dispatch: /%s → %s (args=%s)", cmd_name, handler_fn.__name__, context.args)
+            await handler_fn(update, context)
+        else:
+            logger.warning("Unknown leaked command: /%s — ignoring", cmd_name)
         return
 
     lower = text.lower()
