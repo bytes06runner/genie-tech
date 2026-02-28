@@ -23,9 +23,9 @@ def extract_search_query(screen_text: str, user_command: str = "") -> str:
     and/or the user's command.
 
     Strategy:
-      1. If user command contains a clear subject, use that + "latest news"
+      1. If user command contains a clear subject, use that + "latest"
       2. Otherwise, grab the first recognizable proper nouns / key phrases
-         from the screen text
+         from the screen text, skipping generic site names
       3. Fallback: first 5 meaningful words of screen text
     """
     # Clean up the inputs
@@ -40,20 +40,44 @@ def extract_search_query(screen_text: str, user_command: str = "") -> str:
         "screen", "chart", "page", "tab", "a", "an", "my", "check",
     }
 
+    # Generic site / platform names that should not be the search subject
+    site_noise = {
+        "wikipedia", "google", "facebook", "twitter", "reddit", "youtube",
+        "instagram", "linkedin", "github", "stack", "overflow", "stackoverflow",
+        "amazon", "ebay", "wiki", "portal", "article", "read", "edit",
+        "view", "history", "tools", "talk", "donate", "search", "log",
+        "create", "account", "main", "menu", "contents", "navigation",
+        "free", "encyclopedia", "from", "the", "for", "other", "uses",
+        "see", "redirects", "here", "this", "that", "also", "not",
+        "self", "referential", "detected", "user", "capturing", "dashboard",
+        "external", "data", "text", "button", "logo", "photograph",
+    }
+
     if cmd:
         words = [w for w in re.findall(r"[A-Za-z0-9]+", cmd) if w.lower() not in filler]
         if len(words) >= 2:
             return " ".join(words[:4]) + " latest"
 
     # Extract from screen text — look for capitalized phrases (likely proper nouns)
+    # Filter out generic site/platform names
     caps = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*", text)
     if caps:
-        # Take the longest capitalized phrase (likely a company/product name)
-        best = max(caps[:10], key=len)
-        return best + " latest news"
+        # Filter out generic noise phrases
+        filtered_caps = [
+            c for c in caps[:20]
+            if not all(w.lower() in site_noise for w in c.split())
+        ]
+        if filtered_caps:
+            # Prefer the FIRST significant proper noun — usually the page title / main subject
+            # Only pick a longer phrase if it appears very early (within first 3)
+            best = filtered_caps[0]
+            return best + " latest news"
 
-    # Fallback: first meaningful words from screen text
-    words = [w for w in re.findall(r"[A-Za-z0-9]+", text) if len(w) > 2 and w.lower() not in filler]
+    # Fallback: first meaningful words from screen text (also filtering site noise)
+    words = [
+        w for w in re.findall(r"[A-Za-z0-9]+", text)
+        if len(w) > 2 and w.lower() not in filler and w.lower() not in site_noise
+    ]
     if words:
         return " ".join(words[:5])
 

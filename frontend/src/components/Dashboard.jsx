@@ -46,6 +46,7 @@ export default function Dashboard() {
       else if (msg.includes('[Gamma') && msg.includes('|yellow')) type = 'gamma-research'
       else if (msg.includes('[Gamma')) type = 'gamma-execute'
       else if (msg.includes('[DeepScraper]')) type = 'scraper'
+      else if (msg.includes('[QueryRouter]')) type = 'router'
       else if (msg.includes('[RAG]')) type = 'rag'
       else if (msg.includes('[Scheduler|red') || msg.includes('[Scheduler] ❌')) type = 'error'
       else if (msg.includes('[Scheduler|green') || msg.includes('[Scheduler] ✅')) type = 'success'
@@ -162,20 +163,29 @@ export default function Dashboard() {
       return
     }
 
-    const { domain, decision, rag_context_used, reasoning } = verdict
+    const { domain, action_type, rag_context_used, rich_markdown_output, reasoning } = verdict
     const domainTag = domain ? `[${domain.toUpperCase()}]` : '[UNKNOWN]'
 
-    const decisionMap = {
-      execute:  { emoji: '✅', label: 'EXECUTE',  type: 'success' },
-      abort:    { emoji: '🛑', label: 'ABORT',    type: 'error' },
-      inform:   { emoji: '📋', label: 'INFORM',   type: 'gamma-inform' },
-      research: { emoji: '🔍', label: 'RESEARCH', type: 'gamma-research' },
+    const actionMap = {
+      solve_exam:     { emoji: '🎓', label: 'SOLVE EXAM',     type: 'success' },
+      generate_notes: { emoji: '�', label: 'GENERATE NOTES', type: 'gamma-inform' },
+      trade_analysis: { emoji: '�', label: 'TRADE ANALYSIS', type: 'gamma-research' },
+      code_review:    { emoji: '�', label: 'CODE REVIEW',    type: 'success' },
+      general_inform: { emoji: '📋', label: 'INFORM',         type: 'gamma-inform' },
     }
 
-    const d = decisionMap[decision] || decisionMap.inform
-    addLog(`[System] ${d.emoji} Swarm Verdict ${domainTag}: ${d.label} — ${reasoning || 'No reasoning provided'}`, d.type)
+    const a = actionMap[action_type] || actionMap.general_inform
+    addLog(`[System] ${a.emoji} Swarm Verdict ${domainTag}: ${a.label}`, a.type)
 
-    if (rag_context_used && rag_context_used !== 'none') {
+    if (rich_markdown_output && rich_markdown_output !== 'No output generated.') {
+      addLog(`[Gamma/Output] ${rich_markdown_output}`, 'gamma-execute')
+    }
+
+    if (reasoning) {
+      addLog(`[System] 🔎 Reasoning: ${reasoning}`, 'system')
+    }
+
+    if (rag_context_used && rag_context_used !== 'None' && rag_context_used !== 'none') {
       addLog(`[RAG] 🌐 Context used: ${rag_context_used}`, 'rag')
     }
   }

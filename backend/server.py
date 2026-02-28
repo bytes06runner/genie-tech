@@ -181,6 +181,7 @@ async def instant_analyze(req: InstantAnalyzeRequest):
 
     verdict = await run_swarm(
         text_data=req.text_data,
+        user_command=req.text_data,
         force_vision=req.force_vision,
         broadcast=ws_broadcast,
     )
@@ -215,6 +216,7 @@ async def analyze_screen(req: AnalyzeScreenRequest):
     )
     verdict = await run_swarm(
         text_data=combined_input,
+        user_command=req.command,
         force_vision=False,
         broadcast=ws_broadcast,
     )
