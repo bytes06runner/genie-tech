@@ -27,7 +27,7 @@ import re
 from typing import Optional
 
 from dotenv import load_dotenv
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -66,6 +66,7 @@ logging.basicConfig(
 logger = logging.getLogger("tg_bot")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://x10v-webapp.vercel.app")
 DEFAULT_ALLOCATION = 100.0
 
 
@@ -399,6 +400,33 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ No active monitor with ID `{job_id}`.", parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /transact — open the Telegram Mini App for Algorand Web3 transactions."""
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text="⚡ Open Algorand Bridge",
+            web_app=WebAppInfo(url=WEBAPP_URL),
+        )],
+    ])
+
+    await update.message.reply_text(
+        "🌐 *X10V Web3 Bridge*\n\n"
+        "Tap below to open the Algorand Mini App.\n"
+        "Connect your *Lute Wallet*, view your TestNet balance, "
+        "and sign transactions — all inside Telegram.\n\n"
+        "_Powered by Algorand TestNet + Lute Wallet_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+    log_memory("TelegramBot", f"/transact by user {tg_id}")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for /help — show all available commands."""
     text = (
@@ -407,6 +435,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /start — Create profile ($1,000 demo)\n"
         "  /connect\\_wallet — Algorand Testnet wallet\n"
         "  /analyze `<asset>` — AI Swarm analysis\n"
+        "  /transact — Open Web3 Bridge (Lute Wallet)\n"
         "  /portfolio — Balance & positions\n"
         "  /close `<id>` — Close a paper trade\n"
         "  /monitors — Active price watchers\n"
@@ -415,8 +444,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*How it works:*\n"
         "1️⃣ `/analyze XAU/USD` triggers the Gemini AI Swarm\n"
         "2️⃣ If the swarm says 'monitor\\_and\\_execute', a background job watches the price every 5 min\n"
-        "3️⃣ When the target is hit, the bot auto-executes a paper trade and DMs you\n\n"
-        "_Powered by Gemini 2.5 Flash + Groq + APScheduler_"
+        "3️⃣ When the target is hit, the bot auto-executes a paper trade and DMs you\n"
+        "4️⃣ `/transact` opens the Web3 Mini App for real Algorand TestNet transactions\n\n"
+        "_Powered by Gemini 2.5 Flash + Groq + Algorand + Lute_"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -451,6 +481,7 @@ async def post_init(application):
         BotCommand("start", "Create profile ($1,000 demo)"),
         BotCommand("connect_wallet", "Link Algorand Testnet wallet"),
         BotCommand("analyze", "AI Swarm analysis on any asset"),
+        BotCommand("transact", "Open Algorand Web3 Bridge"),
         BotCommand("portfolio", "View balance & positions"),
         BotCommand("close", "Close a paper trade"),
         BotCommand("monitors", "List active price monitors"),
@@ -481,6 +512,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("connect_wallet", cmd_connect_wallet))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("transact", cmd_transact))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
     app.add_handler(CommandHandler("close", cmd_close))
     app.add_handler(CommandHandler("monitors", cmd_monitors))
