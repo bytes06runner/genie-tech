@@ -22,3 +22,5 @@ Thumbs.db
 # ChromaDB local data
 chroma_data/
 *.db
+*.db-shm
+*.db-wal

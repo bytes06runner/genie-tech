@@ -42,6 +42,7 @@ from paper_engine import (
     get_balance,
     get_user,
     link_wallet,
+    disconnect_wallet,
     open_position,
     close_position,
     get_open_positions,
@@ -126,15 +127,6 @@ async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Use `/start` first to create your profile.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    if user.get("algo_address"):
-        await update.message.reply_text(
-            f"🔗 *Wallet already connected*\n\n"
-            f"Address: `{user['algo_address']}`\n\n"
-            f"_Use Algorand Testnet Dispenser to fund it._",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             text="🔗 Connect Lute Wallet",
@@ -142,15 +134,25 @@ async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )],
     ])
 
-    await update.message.reply_text(
-        "� *Connect Your Algorand Wallet*\n\n"
-        "Tap below to open the Web3 Bridge.\n"
-        "Connect your *Lute Wallet* and your real TestNet address "
-        "will be linked automatically.\n\n"
-        "_Make sure the Lute browser extension is installed and set to TestNet._",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard,
-    )
+    if user.get("algo_address"):
+        await update.message.reply_text(
+            f"🔗 *Current Wallet*\n\n"
+            f"Address: `{user['algo_address']}`\n\n"
+            f"Tap below to *update* to a different Lute wallet, "
+            f"or use `/disconnect` to remove it entirely.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+    else:
+        await update.message.reply_text(
+            "🔗 *Connect Your Algorand Wallet*\n\n"
+            "Tap below to open the Web3 Bridge.\n"
+            "Connect your *Lute Wallet* and your real TestNet address "
+            "will be linked automatically.\n\n"
+            "_Make sure the Lute browser extension is installed and set to TestNet._",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
     log_memory("TelegramBot", f"/connect_wallet (Mini App) by user {tg_id}")
 
 
@@ -185,6 +187,34 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
         disable_web_page_preview=True,
     )
     log_memory("TelegramBot", f"Real wallet connected via Mini App for user {tg_id}: {address[:16]}…")
+
+
+async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /disconnect — wipe saved wallet address so user can start fresh."""
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if not user.get("algo_address"):
+        await update.message.reply_text(
+            "ℹ️ No wallet is currently connected.\n\n"
+            "Use `/connect_wallet` to link one.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    old_address = user["algo_address"]
+    await disconnect_wallet(tg_id)
+
+    await update.message.reply_text(
+        f"🔓 *Wallet Disconnected*\n\n"
+        f"Removed: `{old_address}`\n\n"
+        f"Use `/connect_wallet` to link a new Lute wallet.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    log_memory("TelegramBot", f"/disconnect by user {tg_id}, removed {old_address[:16]}…")
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -459,7 +489,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *X10V Autonomous Trading Bot*\n\n"
         "*Commands:*\n"
         "  /start — Create profile ($1,000 demo)\n"
-        "  /connect\\_wallet — Algorand Testnet wallet\n"
+        "  /connect\\_wallet — Connect Lute wallet via Mini App\n"
+        "  /disconnect — Remove linked wallet\n"
         "  /analyze `<asset>` — AI Swarm analysis\n"
         "  /transact — Open Web3 Bridge (Lute Wallet)\n"
         "  /portfolio — Balance & positions\n"
@@ -505,7 +536,8 @@ async def post_init(application):
     """Set bot commands in the Telegram UI menu."""
     commands = [
         BotCommand("start", "Create profile ($1,000 demo)"),
-        BotCommand("connect_wallet", "Link Algorand Testnet wallet"),
+        BotCommand("connect_wallet", "Connect Lute wallet via Mini App"),
+        BotCommand("disconnect", "Remove linked wallet"),
         BotCommand("analyze", "AI Swarm analysis on any asset"),
         BotCommand("transact", "Open Algorand Web3 Bridge"),
         BotCommand("portfolio", "View balance & positions"),
@@ -537,6 +569,7 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("connect_wallet", cmd_connect_wallet))
+    app.add_handler(CommandHandler("disconnect", cmd_disconnect))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("transact", cmd_transact))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))

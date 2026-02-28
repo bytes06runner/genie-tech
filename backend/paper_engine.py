@@ -115,6 +115,21 @@ async def link_wallet(tg_id: int, address: str, mnemonic: str) -> bool:
     return True
 
 
+async def disconnect_wallet(tg_id: int) -> bool:
+    """Remove the linked Algorand wallet from the user profile."""
+    def _op():
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE users SET algo_address = NULL, algo_mnemonic = NULL WHERE tg_id = ?",
+            (tg_id,),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.get_event_loop().run_in_executor(None, _op)
+    logger.info("🔓 Wallet disconnected for user %d", tg_id)
+    return True
+
+
 async def open_position(tg_id: int, asset: str, amount_usd: float, current_price: float) -> dict:
     """
     Open a new paper trade. Validates sufficient balance.
