@@ -645,7 +645,15 @@ async def parse_workflow_from_nl(text: str, tg_id: int) -> dict:
 
     groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-    prompt = f"""You are an automation workflow builder for a Telegram bot. Parse this user request into a workflow JSON.
+    system_prompt = (
+        "You are a JSON-only automation workflow builder. "
+        "You MUST respond with ONLY a single raw JSON object. "
+        "Do NOT include any markdown formatting, code fences, backticks, "
+        "introductory text, explanations, or trailing commentary. "
+        "Your entire response must be parseable by json.loads() directly."
+    )
+
+    user_prompt = f"""Parse this user request into a workflow JSON.
 
 User request: "{text}"
 
@@ -666,7 +674,7 @@ Available trigger types:
 - "time_once": Run at specific time. config: {{"at": "ISO datetime"}}
 - "manual": Only runs when user triggers it.
 
-Return ONLY valid JSON:
+Respond with ONLY this JSON structure (no other text):
 {{
     "name": "short name",
     "description": "what this workflow does",
@@ -679,7 +687,10 @@ Return ONLY valid JSON:
 
     resp = groq.chat.completions.create(
         model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
         temperature=0.1,
         max_tokens=800,
     )
@@ -697,12 +708,20 @@ async def parse_scheduled_message_nl(text: str) -> dict:
 
     groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+    system_prompt = (
+        "You are a JSON-only schedule parser. "
+        "You MUST respond with ONLY a single raw JSON object. "
+        "Do NOT include any markdown formatting, code fences, backticks, "
+        "introductory text, explanations, or trailing commentary. "
+        "Your entire response must be parseable by json.loads() directly."
+    )
+
     now_iso = datetime.now(timezone.utc).isoformat()
-    prompt = f"""Parse this scheduling request into JSON. Current UTC time: {now_iso}
+    user_prompt = f"""Parse this scheduling request into JSON. Current UTC time: {now_iso}
 
 User request: "{text}"
 
-Return ONLY valid JSON:
+Respond with ONLY this JSON structure (no other text):
 {{
     "message": "the message to send",
     "run_at": "ISO 8601 datetime in UTC when to send it (null if immediate repeat)",
@@ -717,7 +736,10 @@ Examples:
 
     resp = groq.chat.completions.create(
         model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
         temperature=0.1,
         max_tokens=300,
     )
@@ -727,31 +749,46 @@ Examples:
 
 def _safe_parse_json(raw: str) -> dict:
     """
-    Robustly extract JSON from LLM output that may have extra text,
-    markdown fences, or trailing content after the JSON.
-    """
-    # Strip markdown code fences
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```(?:json)?\s*', '', raw)
-        raw = re.sub(r'\s*```\s*$', '', raw)
+    Robustly extract JSON from LLM output that may contain markdown fences,
+    introductory text, trailing commentary, or other non-JSON content.
 
-    # Try parsing the whole string first
+    Strategy:
+      1. Strip ```json / ``` markdown fences
+      2. Try json.loads() on the cleaned string
+      3. Use regex to extract the first { ... } block
+      4. Fall back to balanced-brace extraction for nested objects
+    """
+    # ── Step 1: Strip markdown code fences ──
+    cleaned = raw.strip()
+    cleaned = re.sub(r'^```(?:json|JSON)?\s*\n?', '', cleaned)
+    cleaned = re.sub(r'\n?\s*```\s*$', '', cleaned)
+    cleaned = cleaned.strip()
+
+    # ── Step 2: Try direct parse ──
     try:
-        return json.loads(raw)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
 
-    # Find the first { and try to match its closing }
-    start = raw.find('{')
+    # ── Step 3: Regex extraction — grab first { ... } block ──
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if match:
+        candidate = match.group(0)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # ── Step 4: Balanced-brace extraction for nested JSON ──
+    start = cleaned.find('{')
     if start < 0:
         raise ValueError("No JSON object found in response")
 
     depth = 0
     in_string = False
     escape = False
-    for i in range(start, len(raw)):
-        c = raw[i]
+    for i in range(start, len(cleaned)):
+        c = cleaned[i]
         if escape:
             escape = False
             continue
@@ -769,10 +806,13 @@ def _safe_parse_json(raw: str) -> dict:
             depth -= 1
             if depth == 0:
                 try:
-                    return json.loads(raw[start:i+1])
+                    return json.loads(cleaned[start:i+1])
                 except json.JSONDecodeError:
                     continue
 
-    # Last resort: naive approach
-    json_end = raw.rfind('}') + 1
-    return json.loads(raw[start:json_end])
+    # ── Last resort: first { to last } ──
+    json_end = cleaned.rfind('}') + 1
+    if json_end > start:
+        return json.loads(cleaned[start:json_end])
+
+    raise ValueError("No JSON object found in response")
