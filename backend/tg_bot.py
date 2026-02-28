@@ -119,7 +119,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for /connect_wallet — generate Algorand Testnet account."""
+    """Handler for /connect_wallet — open Mini App for real Lute Wallet connection."""
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     if not user:
@@ -135,30 +135,56 @@ async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    await update.message.reply_text("🔄 Generating Algorand Testnet wallet …")
-
-    try:
-        from algosdk import account, mnemonic
-        private_key, address = account.generate_account()
-        passphrase = mnemonic.from_private_key(private_key)
-    except ImportError:
-        import hashlib, secrets
-        raw = secrets.token_bytes(32)
-        address = "ALGO" + hashlib.sha256(raw).hexdigest()[:54].upper()
-        passphrase = "mock-mnemonic-store-securely"
-        logger.warning("py-algorand-sdk not installed — using mock wallet")
-
-    await link_wallet(tg_id, address, passphrase)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text="🔗 Connect Lute Wallet",
+            web_app=WebAppInfo(url=WEBAPP_URL),
+        )],
+    ])
 
     await update.message.reply_text(
-        "✅ *Algorand Testnet Wallet Connected!*\n\n"
+        "� *Connect Your Algorand Wallet*\n\n"
+        "Tap below to open the Web3 Bridge.\n"
+        "Connect your *Lute Wallet* and your real TestNet address "
+        "will be linked automatically.\n\n"
+        "_Make sure the Lute browser extension is installed and set to TestNet._",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+    log_memory("TelegramBot", f"/connect_wallet (Mini App) by user {tg_id}")
+
+
+async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive real wallet address from the Telegram Mini App via web_app_data."""
+    tg_id = update.effective_user.id
+    raw_data = update.effective_message.web_app_data.data
+
+    try:
+        payload = json.loads(raw_data)
+        address = payload.get("address", "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        address = raw_data.strip()
+
+    if not address or len(address) < 20:
+        await update.message.reply_text("⚠️ Invalid wallet address received from Mini App.")
+        return
+
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await link_wallet(tg_id, address, "lute-external-wallet")
+
+    await update.message.reply_text(
+        f"✅ *Successfully connected real wallet!*\n\n"
         f"📬 *Address:*\n`{address}`\n\n"
-        "💧 *Fund it:* [Algorand Testnet Dispenser](https://bank.testnet.algorand.network/)\n\n"
-        "⚠️ _Your mnemonic is stored securely. This is a testnet wallet for hackathon demo only._",
+        f"💧 *Fund it:* [Algorand Testnet Dispenser](https://bank.testnet.algorand.network/)\n\n"
+        f"_Your Lute Wallet is now linked to X10V. Use `/portfolio` to check your status._",
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
     )
-    log_memory("TelegramBot", f"/connect_wallet for user {tg_id}: {address[:16]}…")
+    log_memory("TelegramBot", f"Real wallet connected via Mini App for user {tg_id}: {address[:16]}…")
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -518,6 +544,7 @@ def main():
     app.add_handler(CommandHandler("monitors", cmd_monitors))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("=" * 60)

@@ -13,6 +13,7 @@ function WalletBridge() {
   const [txId, setTxId] = useState(null)
   const [loading, setLoading] = useState(false)
   const [sendAmount, setSendAmount] = useState('0.1')
+  const [addressSent, setAddressSent] = useState(false)
 
   useEffect(() => {
     if (tg) {
@@ -25,10 +26,19 @@ function WalletBridge() {
   useEffect(() => {
     if (activeAccount?.address) {
       refreshBalance()
+
+      if (tg && !addressSent) {
+        setAddressSent(true)
+        tg.sendData(JSON.stringify({
+          action: 'wallet_connected',
+          address: activeAccount.address,
+        }))
+        tg.close()
+      }
     } else {
       setBalance(null)
     }
-  }, [activeAccount])
+  }, [activeAccount, addressSent])
 
   const refreshBalance = useCallback(async () => {
     if (!activeAccount?.address) return
