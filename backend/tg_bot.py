@@ -6,8 +6,11 @@ Paper Trading Engine, Algorand Wallet, and Async Market Monitor.
 
 Commands:
   /start                — Initialise user profile ($1,000 demo balance)
-  /connect_wallet       — Generate & link an Algorand Testnet wallet
+  /connect_wallet       — Open Mini App to connect Lute Wallet (Web3)
+  /disconnect           — Remove linked wallet address
+  /reset_wallet         — Alias for /disconnect (force-clear)
   /analyze <asset>      — Trigger swarm analysis on any asset
+  /transact             — Open Web3 Bridge for Algorand transactions
   /portfolio            — View balance, open positions, active monitors
   /close <position_id>  — Close an open paper trade
   /monitors             — List active price monitors
@@ -17,6 +20,8 @@ Commands:
 Architecture:
   python-telegram-bot v20+ (async) → swarm_brain.py → paper_engine.py
   APScheduler market_monitor.py runs autonomously in the background.
+  Wallet connection is fully Web3 via Telegram Mini App + Lute Extension.
+  Zero backend key generation — no algosdk.account, no mnemonics.
 """
 
 import asyncio
@@ -217,6 +222,33 @@ async def cmd_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     log_memory("TelegramBot", f"/disconnect by user {tg_id}, removed {old_address[:16]}…")
 
+
+async def cmd_reset_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /reset_wallet — force-clear wallet regardless of current state."""
+    tg_id = update.effective_user.id
+    user = await get_user(tg_id)
+    if not user:
+        await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    old_address = user.get("algo_address")
+    await disconnect_wallet(tg_id)
+
+    if old_address:
+        await update.message.reply_text(
+            f"🗑️ *Wallet Force-Reset*\n\n"
+            f"Cleared: `{old_address}`\n"
+            f"Mnemonic wiped from DB.\n\n"
+            f"You're on a clean slate. Use `/connect_wallet` to link your real Lute wallet.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    else:
+        await update.message.reply_text(
+            "✅ *Wallet already clean* — no address stored.\n\n"
+            "Use `/connect_wallet` to link your Lute wallet.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    log_memory("TelegramBot", f"/reset_wallet by user {tg_id}")
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for /analyze <asset> — trigger AI Swarm analysis."""
@@ -493,6 +525,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /start — Create profile ($1,000 demo)\n"
         "  /connect\\_wallet — Connect Lute wallet via Mini App\n"
         "  /disconnect — Remove linked wallet\n"
+        "  /reset\\_wallet — Force-clear wallet (clean slate)\n"
         "  /analyze `<asset>` — AI Swarm analysis\n"
         "  /transact — Open Web3 Bridge (Lute Wallet)\n"
         "  /portfolio — Balance & positions\n"
@@ -540,6 +573,7 @@ async def post_init(application):
         BotCommand("start", "Create profile ($1,000 demo)"),
         BotCommand("connect_wallet", "Connect Lute wallet via Mini App"),
         BotCommand("disconnect", "Remove linked wallet"),
+        BotCommand("reset_wallet", "Force-clear wallet (clean slate)"),
         BotCommand("analyze", "AI Swarm analysis on any asset"),
         BotCommand("transact", "Open Algorand Web3 Bridge"),
         BotCommand("portfolio", "View balance & positions"),
@@ -572,6 +606,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("connect_wallet", cmd_connect_wallet))
     app.add_handler(CommandHandler("disconnect", cmd_disconnect))
+    app.add_handler(CommandHandler("reset_wallet", cmd_reset_wallet))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("transact", cmd_transact))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))

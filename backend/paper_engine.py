@@ -11,6 +11,7 @@ Tables:
 
 import asyncio
 import logging
+import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,7 +19,7 @@ from uuid import uuid4
 
 logger = logging.getLogger("paper_engine")
 
-DB_PATH = "users.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.db")
 
 
 def _get_conn() -> sqlite3.Connection:
