@@ -26,19 +26,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("scheduler_node")
 
-# ---------------------------------------------------------------------------
-# Scheduler singleton
-# ---------------------------------------------------------------------------
 scheduler = AsyncIOScheduler(
     jobstores={"default": MemoryJobStore()},
     job_defaults={"coalesce": True, "max_instances": 3},
 )
 
 # In-memory task registry (used by the frontend queue view)
-# task_id → {id, description, run_at, status, result}
 task_registry: dict[str, dict] = {}
 
-# Broadcast hook — set by server.py at startup
 _broadcast_fn: BroadcastFn = None
 
 
@@ -46,10 +41,6 @@ def set_broadcast(fn: BroadcastFn):
     global _broadcast_fn
     _broadcast_fn = fn
 
-
-# ---------------------------------------------------------------------------
-# The scheduled job
-# ---------------------------------------------------------------------------
 
 async def _scheduled_job(
     task_id: str,
@@ -70,8 +61,7 @@ async def _scheduled_job(
     if _broadcast_fn:
         await _broadcast_fn(f"[Scheduler] ⏰ Job fired: {description}")
 
-    # --- Step 1: Scrape live data ---
-    logger.info("Step 1/3 — Scraping %s [%s] …", scrape_url, scrape_selector)
+    logger.info("Scraping %s [%s] …", scrape_url, scrape_selector)
     if _broadcast_fn:
         await _broadcast_fn(f"[Scheduler] Scraping live data from {scrape_url} …")
 
@@ -89,8 +79,7 @@ async def _scheduled_job(
     logger.info("Scraped %d chars of live data.", len(raw_text))
     task_registry[task_id]["status"] = "swarm_debating"
 
-    # --- Step 2: Swarm safety check ---
-    logger.info("Step 2/3 — Running swarm analysis …")
+    logger.info("Running swarm analysis …")
     if _broadcast_fn:
         await _broadcast_fn("[Scheduler] Feeding data to swarm for safety check …")
 
@@ -107,7 +96,7 @@ async def _scheduled_job(
 
     # --- Step 3: Execute the Playwright action ---
     if action_url and action_selector and action_type:
-        logger.info("Step 3/3 — Executing Playwright action on %s …", action_url)
+        logger.info("Executing Playwright action on %s …", action_url)
         task_registry[task_id]["status"] = "executing"
         if _broadcast_fn:
             await _broadcast_fn(f"[Scheduler] ✅ Swarm approved — executing action on {action_url} …")
@@ -134,18 +123,13 @@ async def _scheduled_job(
             if _broadcast_fn:
                 await _broadcast_fn(f"[Scheduler|red] ❌ Execution failed: {exec_result['error']}")
     else:
-        # Analysis-only job — no execution step
-        logger.info("✅ Analysis-only job %s complete. Swarm approved.", task_id)
+        logger.info("Analysis-only job %s complete. Swarm approved.", task_id)
         task_registry[task_id]["status"] = "completed"
         task_registry[task_id]["result"] = verdict
         log_memory("Scheduler", f"Job {task_id} COMPLETED (analysis only).")
         if _broadcast_fn:
             await _broadcast_fn(f"[Scheduler|green] ✅ Analysis complete: {description}")
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def register_task(
     description: str,

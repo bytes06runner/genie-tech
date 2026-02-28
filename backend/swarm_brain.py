@@ -12,9 +12,13 @@ Six-stage STATELESS pipeline — Gemini primary + Groq secondary:
 Output contract (universal):
   {
     "domain":           "finance | code | education | general",
-    "action_type":      "solve_exam | generate_notes | trade_analysis | general_inform",
-    "rag_context_used": "brief summary of data used, or 'None'",
-    "rich_markdown_output": "Heavily formatted Markdown with ## headers, bullets, code blocks, LaTeX",
+    "decision":         "inform | execute | abort",
+    "structured_data":  {
+        "summary":               "Concise 2-sentence overview",
+        "timeline_or_metrics":   [{"key": "...", "value": "..."}]
+    },
+    "generate_file":    true | false,
+    "file_type":        "pdf | md | none",
     "reasoning":        "internal swarm logic for this decision"
   }
 
@@ -47,26 +51,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("swarm_brain")
 
-# ---------------------------------------------------------------------------
-# Clients — stateless singletons (no conversation history stored)
-# ---------------------------------------------------------------------------
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Type alias for the broadcast callback
 BroadcastFn = Optional[Callable[[str], Coroutine[Any, Any, None]]]
 
-# ---------------------------------------------------------------------------
-# Model routing
-# ---------------------------------------------------------------------------
-ALPHA_MODEL  = "llama-3.1-8b-instant"                   # Groq — fastest impulse
-BETA_MODEL   = "gemini-2.5-flash"                       # Gemini — deep scraper analyst
-GAMMA_MODEL  = "gemini-2.5-flash"                       # Gemini — final arbiter (JSON mode)
-VISION_MODEL = "gemini-2.5-flash"                       # Gemini — multimodal vision
-
-# ---------------------------------------------------------------------------
-# STATELESS system prompts — every agent is told to IGNORE prior context
-# ---------------------------------------------------------------------------
+ALPHA_MODEL  = "llama-3.1-8b-instant"
+BETA_MODEL   = "gemini-2.5-flash"
+GAMMA_MODEL  = "gemini-2.5-flash"
+VISION_MODEL = "gemini-2.5-flash"
 _STATELESS_PREAMBLE = (
     "CRITICAL INSTRUCTION: Base your analysis STRICTLY and ONLY on the provided "
     "screen text and live scraped data below. You have NO prior context. Do NOT "
@@ -127,35 +120,73 @@ BETA_SYSTEM = (
 
 GAMMA_SYSTEM = (
     _STATELESS_PREAMBLE +
-    "You are Agent Gamma (The Arbiter) — the final consensus engine and rich document generator. "
-    "You receive Alpha's rapid take and Beta's deep audit/analysis. "
-    "Synthesize their work into a polished, human-readable output.\n\n"
-    "You MUST output ONLY a valid JSON object with exactly these five keys:\n"
+    "You are Agent Gamma (The Arbiter) — the final consensus engine and structured data "
+    "distiller. You receive Alpha's rapid take and Beta's deep audit/analysis. "
+    "Your job is to synthesize their work into CLEAN, STRUCTURED JSON — never long paragraphs.\n\n"
+
+    "You MUST output ONLY a valid JSON object with exactly these six keys:\n"
     "{\n"
     '  "domain": "finance" | "code" | "education" | "general",\n'
-    '  "action_type": "solve_exam" | "generate_notes" | "trade_analysis" | "code_review" | "general_inform",\n'
-    '  "rag_context_used": "brief summary of data used, or \'None\'",\n'
-    '  "rich_markdown_output": "USE HEAVILY FORMATTED MARKDOWN — see formatting rules below",\n'
-    '  "reasoning": "internal swarm logic for this decision"\n'
+    '  "decision": "inform" | "execute" | "abort",\n'
+    '  "structured_data": {\n'
+    '    "summary": "A concise 2-sentence overview of the final analysis.",\n'
+    '    "timeline_or_metrics": [\n'
+    '      {"key": "Date, Metric, Step, or Label", "value": "Event, Data Point, or Detail"}\n'
+    '    ]\n'
+    '  },\n'
+    '  "generate_file": true | false,\n'
+    '  "file_type": "pdf" | "md" | "none",\n'
+    '  "reasoning": "Internal swarm logic for this decision"\n'
     "}\n\n"
-    "FORMATTING RULES for rich_markdown_output:\n"
-    "  • Use ## headers to organize sections\n"
-    "  • Use **bold** for key terms and definitions\n"
-    "  • Use bullet points (•) for lists\n"
-    "  • Use ```python or ```java code blocks for any code solutions\n"
-    "  • Use $$ LaTeX $$ for mathematical equations and formulas\n"
-    "  • For exam solutions: number each answer, show step-by-step working\n"
-    "  • For study notes: organize by topic with clear headers\n"
-    "  • For code: include the complete solution with inline comments\n"
-    "  • For finance: include specific numbers, percentages, and risk levels\n"
-    "  • Make it comprehensive and publication-ready\n\n"
-    "action_type guide:\n"
-    "  • solve_exam      — visible exam/question paper was solved\n"
-    "  • generate_notes  — study notes or summary was generated from visible content\n"
-    "  • trade_analysis  — financial analysis with actionable insights\n"
-    "  • code_review     — code was analyzed, debugged, or solutions provided\n"
-    "  • general_inform  — general information or analysis\n\n"
-    "No text outside the JSON object. Escape newlines as \\n inside JSON strings."
+
+    "═══ STRUCTURED DATA DIRECTIVE ═══\n"
+    "Stop writing long paragraphs. Distill ALL analysis into the structured_data object.\n"
+    "Extract key dates, financial metrics, code steps, or concepts into the "
+    "timeline_or_metrics array as DISTINCT key-value pairs.\n\n"
+
+    "DOMAIN-SPECIFIC EXTRACTION RULES:\n\n"
+
+    "📚 Education / History:\n"
+    "  • summary: 2 sentences covering the topic and key takeaway.\n"
+    "  • timeline_or_metrics: Extract each important date, concept, formula, or "
+    "definition as a separate {key, value} pair.\n"
+    "  • Example keys: '1776', 'Newton\\'s 2nd Law', 'Time Complexity', 'Definition: Recursion'\n\n"
+
+    "📈 Finance / Stock:\n"
+    "  • summary: 2 sentences — asset name, trend, and recommendation.\n"
+    "  • timeline_or_metrics: Extract each metric as a pair.\n"
+    "  • Example keys: 'CMP', 'P/E Ratio', '52W High', 'RSI', 'Support Level', "
+    "'Risk Level', 'Verdict'\n\n"
+
+    "💻 Code:\n"
+    "  • summary: 2 sentences — what the code does, any bugs found.\n"
+    "  • timeline_or_metrics: Extract each bug, fix step, or implementation step.\n"
+    "  • Example keys: 'Bug #1', 'Fix', 'Step 1', 'Step 2', 'Complexity', 'Language'\n"
+    "  • For code solutions, put the complete code as the value of a 'Solution Code' key.\n\n"
+
+    "📋 General:\n"
+    "  • summary: 2 sentences covering the main finding.\n"
+    "  • timeline_or_metrics: Extract each key finding, fact, or recommendation.\n\n"
+
+    "QUANTITY RULES:\n"
+    "  • timeline_or_metrics MUST have at least 3 entries and at most 15.\n"
+    "  • Each value should be concise — 1-2 sentences max.\n"
+    "  • Keys should be short labels (≤5 words), values are the data.\n\n"
+
+    "DECISION GUIDE:\n"
+    "  • inform   — presenting analysis, study notes, information to the user\n"
+    "  • execute  — actionable recommendation (trade, deploy code, submit answer)\n"
+    "  • abort    — data is insufficient, self-referential, or contradictory\n\n"
+
+    "FILE GENERATION RULES:\n"
+    "  • Set generate_file to true ONLY IF the user explicitly asks for a file, "
+    "PDF, document, download, export, or notes file.\n"
+    "  • Keywords: 'pdf', 'download', 'export', 'save', 'document', 'file', "
+    "'generate pdf', 'make a doc'.\n"
+    "  • Default file_type to 'pdf'. If user says 'markdown' or 'md', use 'md'.\n"
+    "  • If generate_file is false, set file_type to 'none'.\n\n"
+
+    "No text outside the JSON object. Escape special characters properly in JSON strings."
 )
 
 VISION_SYSTEM = (
@@ -176,10 +207,6 @@ VISION_SYSTEM = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Vision extraction — Gemini 2.5 Flash (multimodal)
-# ---------------------------------------------------------------------------
-
 async def extract_vision_context(image_base64: str, user_command: str, broadcast: BroadcastFn = None) -> str:
     """
     Pass a real base64 screenshot to Gemini 2.5 Flash for vision extraction.
@@ -191,7 +218,6 @@ async def extract_vision_context(image_base64: str, user_command: str, broadcast
         await broadcast(f"[Vision] 👁️ Sending screenshot to Gemini {VISION_MODEL} for pixel analysis …")
 
     try:
-        # Build a completely LOCAL prompt — no global state
         vision_prompt = (
             f"User command: {user_command}. "
             "Extract ALL useful information visible in this screenshot. "
@@ -201,7 +227,6 @@ async def extract_vision_context(image_base64: str, user_command: str, broadcast
             "Be highly precise and thorough. Return only the raw data. No markdown."
         )
 
-        # Gemini multimodal: pass image as inline_data part
         response = gemini_client.models.generate_content(
             model=VISION_MODEL,
             contents=[
@@ -234,10 +259,6 @@ async def extract_vision_context(image_base64: str, user_command: str, broadcast
         return f"Vision extraction failed ({str(e)[:100]}). User command was: {user_command}"
 
 
-# ---------------------------------------------------------------------------
-# Individual agent calls — ALL STATELESS (local variables only)
-# ---------------------------------------------------------------------------
-
 async def _call_alpha(text_data: str, broadcast: BroadcastFn = None) -> str:
     """
     Agent Alpha — Groq / llama-3.1-8b-instant (speed-optimised impulse).
@@ -247,7 +268,6 @@ async def _call_alpha(text_data: str, broadcast: BroadcastFn = None) -> str:
     if broadcast:
         await broadcast(f"[Alpha/Impulse] Starting rapid analysis via Groq/{ALPHA_MODEL} …")
 
-    # LOCAL prompt — no prior context, no memory bleed
     local_prompt = (
         "Below is the ONLY data you have. Analyze it from scratch.\n\n"
         f"Live data:\n{text_data}"
@@ -291,7 +311,6 @@ async def _call_beta(
     if broadcast:
         await broadcast(f"[Beta/DeepAnalyst] Starting deep analysis via Gemini/{BETA_MODEL} …")
 
-    # LOCAL prompt — all data is passed explicitly, no global references
     scrape_section = (
         f"=== LIVE SCRAPED WEBPAGE (from {scraped_url}) ===\n{scraped_data}\n=== END SCRAPED DATA ==="
         if scraped_data and scraped_data.strip()
@@ -339,6 +358,7 @@ async def _call_gamma(
     alpha_result: str,
     beta_result: str,
     scraped_summary: str = "",
+    user_command: str = "",
     broadcast: BroadcastFn = None,
 ) -> dict:
     """
@@ -350,15 +370,17 @@ async def _call_gamma(
     if broadcast:
         await broadcast(f"[Gamma/Arbiter] Synthesising final consensus via Gemini/{GAMMA_MODEL} …")
 
-    # LOCAL prompt — zero prior context
     local_prompt = (
         "Below is ALL the data you have. You have NO prior context. "
         "Do NOT reference any previous queries or topics.\n\n"
+        f"=== USER COMMAND ===\n{user_command}\n=== END USER COMMAND ===\n\n"
         f"=== ALPHA SAYS ===\n{alpha_result}\n=== END ALPHA ===\n\n"
         f"=== BETA SAYS (audit/verification) ===\n{beta_result}\n=== END BETA ===\n\n"
         f"Scraped web summary: {scraped_summary[:200] if scraped_summary else 'None — local analysis only'}\n\n"
-        "Produce your final JSON verdict with keys: domain, action_type, rag_context_used, "
-        "rich_markdown_output, reasoning. Make rich_markdown_output comprehensive and beautifully formatted."
+        "Produce your final JSON verdict with keys: domain, decision, structured_data, "
+        "generate_file, file_type, reasoning. "
+        "Distill everything into structured_data.summary (2 sentences) and "
+        "structured_data.timeline_or_metrics (array of {key, value} pairs)."
     )
 
     try:
@@ -380,65 +402,91 @@ async def _call_gamma(
         raw = response.text.strip() if response.text else "{}"
         result = json.loads(raw)
 
-        # Ensure all five keys exist with sane defaults
         result.setdefault("domain", "general")
-        result.setdefault("action_type", "general_inform")
-        result.setdefault("rag_context_used", "None")
-        result.setdefault("rich_markdown_output", "No output generated.")
+        result.setdefault("decision", "inform")
+        result.setdefault("structured_data", {
+            "summary": "No summary generated.",
+            "timeline_or_metrics": []
+        })
+        result.setdefault("generate_file", False)
+        result.setdefault("file_type", "none")
         result.setdefault("reasoning", "No reasoning provided.")
 
-        # Normalize action_type to allowed values
-        valid_actions = ("solve_exam", "generate_notes", "trade_analysis", "code_review", "general_inform")
-        if result["action_type"] not in valid_actions:
-            result["action_type"] = "general_inform"
+        sd = result["structured_data"]
+        if not isinstance(sd, dict):
+            result["structured_data"] = {
+                "summary": str(sd)[:200] if sd else "No summary generated.",
+                "timeline_or_metrics": []
+            }
+        else:
+            sd.setdefault("summary", "No summary generated.")
+            sd.setdefault("timeline_or_metrics", [])
+            if not isinstance(sd["timeline_or_metrics"], list):
+                sd["timeline_or_metrics"] = []
+
+        if isinstance(result["generate_file"], str):
+            result["generate_file"] = result["generate_file"].lower() in ("true", "yes", "1")
+
+        if result["file_type"] not in ("pdf", "md", "none"):
+            result["file_type"] = "none"
+        if not result["generate_file"]:
+            result["file_type"] = "none"
+
+        valid_decisions = ("inform", "execute", "abort")
+        if result["decision"] not in valid_decisions:
+            result["decision"] = "inform"
 
     except json.JSONDecodeError:
         result = {
             "domain": "general",
-            "action_type": "general_inform",
-            "rag_context_used": "None",
-            "rich_markdown_output": f"⚠️ Gamma returned unparseable output:\n\n```\n{raw[:300]}\n```",
+            "decision": "abort",
+            "structured_data": {
+                "summary": "Gamma returned unparseable output. Raw data could not be processed.",
+                "timeline_or_metrics": [
+                    {"key": "Error", "value": f"JSON parse failure: {raw[:120]}"}
+                ]
+            },
+            "generate_file": False,
+            "file_type": "none",
             "reasoning": f"Gamma returned unparseable output: {raw[:120]}",
         }
         logger.error("Gamma JSON parse error. Raw: %s", raw[:200])
     except Exception as e:
         result = {
             "domain": "general",
-            "action_type": "general_inform",
-            "rag_context_used": "None",
-            "rich_markdown_output": f"⚠️ Gamma encountered an error: {str(e)[:120]}",
+            "decision": "abort",
+            "structured_data": {
+                "summary": f"Gamma encountered an error: {str(e)[:100]}. Safe mode engaged.",
+                "timeline_or_metrics": [
+                    {"key": "Error", "value": str(e)[:120]}
+                ]
+            },
+            "generate_file": False,
+            "file_type": "none",
             "reasoning": f"Gemini Gamma error: {str(e)[:80]}. Safe mode engaged.",
         }
         logger.error("Gamma error: %s", e)
 
-    action_tag = {
-        "solve_exam": "🎓 SOLVE EXAM",
-        "generate_notes": "� GENERATE NOTES",
-        "trade_analysis": "📈 TRADE ANALYSIS",
-        "code_review": "� CODE REVIEW",
-        "general_inform": "� INFORM",
-    }.get(result.get("action_type"), "❓ UNKNOWN")
+    decision_tag = {
+        "inform": "📋 INFORM",
+        "execute": "✅ EXECUTE",
+        "abort": "🛑 ABORT",
+    }.get(result.get("decision"), "❓ UNKNOWN")
 
-    logger.info("🟢 Gamma verdict: %s [%s] — %s", action_tag, result.get("domain"), result.get("reasoning", "")[:120])
+    logger.info("🟢 Gamma verdict: %s [%s] — %s", decision_tag, result.get("domain"), result.get("reasoning", "")[:120])
     log_memory("Gamma", json.dumps(result)[:1000])
 
     if broadcast:
-        action = result.get("action_type", "general_inform")
+        decision = result.get("decision", "inform")
         colour = {
-            "solve_exam": "green",
-            "generate_notes": "cyan",
-            "trade_analysis": "yellow",
-            "code_review": "green",
-            "general_inform": "cyan",
-        }.get(action, "green")
+            "inform": "cyan",
+            "execute": "green",
+            "abort": "red",
+        }.get(decision, "cyan")
         await broadcast(f"[Gamma/Arbiter|{colour}] {json.dumps(result)}")
 
     return result
 
-
-# ---------------------------------------------------------------------------
-# Public orchestrator — FULLY STATELESS
-# ---------------------------------------------------------------------------
 
 async def run_swarm(
     text_data: str,
@@ -470,10 +518,9 @@ async def run_swarm(
 
     Returns
     -------
-    dict  {"domain", "action_type", "rag_context_used", "rich_markdown_output", "reasoning"}
+    dict  {"domain", "decision", "structured_data", "generate_file", "file_type", "reasoning"}
     """
-    # ── ALL LOCAL VARIABLES — no global state ──
-    local_text = str(text_data)  # defensive copy
+    local_text = str(text_data)
     local_command = str(user_command)
     local_search_query = ""
     local_scraped_text = ""
@@ -489,7 +536,6 @@ async def run_swarm(
     if broadcast:
         await broadcast("[Swarm] ══════════ SWARM INITIATED ══════════")
 
-    # ── Stage 1: Smart Query Router (Groq — ultra-fast) ──
     if broadcast:
         await broadcast("[QueryRouter] 🧭 Analyzing intent — search web or local analysis? …")
 
@@ -514,7 +560,7 @@ async def run_swarm(
             await broadcast(f"[QueryRouter] 🧭 Verdict: SEARCH → \"{local_search_query}\"")
             await broadcast(f"[DeepScraper] 🔍 Searching & scraping the web for: \"{local_search_query}\" …")
 
-        # ── Stage 1b: Deep Scrape (only if Router says search) ──
+        # Deep Scrape (only if Router says search)
         scrape_result = await deep_scrape(local_search_query, timeout_seconds=8)
         local_scraped_text = scrape_result.get("text", "")
         local_scraped_url = scrape_result.get("url", "")
@@ -526,23 +572,21 @@ async def run_swarm(
             else:
                 await broadcast("[DeepScraper] ⚠️ Scrape failed — proceeding with screen data only.")
 
-    # ── Stage 2: Alpha (Groq — rapid hypothesis / Genius Student Mode, STATELESS) ──
     local_alpha_result = await _call_alpha(local_text, broadcast)
-    await asyncio.sleep(1.5)  # burst protection
+    await asyncio.sleep(1.5)
 
-    # ── Stage 3: Beta (Gemini — deep audit + optional scraped data, STATELESS) ──
     local_beta_result = await _call_beta(
         local_text, local_alpha_result,
         scraped_data=local_scraped_text if not local_search_skipped else "",
         scraped_url=local_scraped_url,
         broadcast=broadcast,
     )
-    await asyncio.sleep(1.0)  # burst protection
+    await asyncio.sleep(1.0)
 
-    # ── Stage 4: Gamma (Gemini — final arbiter, rich Markdown, STATELESS, JSON mode) ──
     gamma_verdict = await _call_gamma(
         local_alpha_result, local_beta_result,
         scraped_summary=local_scraped_text[:300] if not local_search_skipped else "",
+        user_command=local_command,
         broadcast=broadcast,
     )
 
@@ -551,8 +595,8 @@ async def run_swarm(
     logger.info("=" * 60)
 
     if broadcast:
-        action = gamma_verdict.get("action_type", "general_inform")
+        decision = gamma_verdict.get("decision", "inform")
         domain = gamma_verdict.get("domain", "general")
-        await broadcast(f"[Swarm] ══════════ SWARM COMPLETE ══════════ [{domain.upper()}] action={action}")
+        await broadcast(f"[Swarm] ══════════ SWARM COMPLETE ══════════ [{domain.upper()}] decision={decision}")
 
     return gamma_verdict

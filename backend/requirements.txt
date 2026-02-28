@@ -9,3 +9,5 @@ python-dotenv==1.0.1
 websockets==14.1
 pydantic==2.10.4
 duckduckgo-search==7.5.1
+markdown==3.7
+weasyprint==62.3

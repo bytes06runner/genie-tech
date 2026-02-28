@@ -28,10 +28,6 @@ STATE_PATH = os.getenv("PLAYWRIGHT_STATE_PATH", "./browser_state.json")
 DEFAULT_TIMEOUT_MS = 15_000
 
 
-# ---------------------------------------------------------------------------
-# Context manager for browser lifecycle
-# ---------------------------------------------------------------------------
-
 class HeadlessBrowser:
     """
     Async context manager that provisions a Chromium instance with
@@ -56,7 +52,6 @@ class HeadlessBrowser:
             args=launch_args,
         )
 
-        # Load saved session state if it exists
         if os.path.isfile(STATE_PATH):
             logger.info("Loading saved browser state from '%s'", STATE_PATH)
             self._context = await self._browser.new_context(storage_state=STATE_PATH)
@@ -85,10 +80,6 @@ class HeadlessBrowser:
             await self._context.storage_state(path=STATE_PATH)
             logger.info("Browser state saved → %s", STATE_PATH)
 
-
-# ---------------------------------------------------------------------------
-# Core execution function
-# ---------------------------------------------------------------------------
 
 async def execute_web_action(
     url: str,
@@ -138,13 +129,11 @@ async def execute_web_action(
 
             result_data = None
 
-            # ---- CLICK ----
             if action_type == "click":
                 await element.click()
                 logger.info("✅ Clicked '%s'", target_selector)
                 result_data = "clicked"
 
-            # ---- TYPE ----
             elif action_type == "type":
                 if input_text is None:
                     raise ValueError("action_type='type' requires input_text.")
@@ -152,12 +141,10 @@ async def execute_web_action(
                 logger.info("✅ Typed '%s' into '%s'", input_text[:40], target_selector)
                 result_data = f"typed: {input_text[:80]}"
 
-            # ---- EXTRACT TEXT ----
             elif action_type == "extract_text":
                 result_data = await element.inner_text()
                 logger.info("✅ Extracted text (%d chars)", len(result_data))
 
-            # ---- SCREENSHOT ----
             elif action_type == "screenshot":
                 path = f"./screenshot_{url.split('//')[1][:20].replace('/', '_')}.png"
                 await page.screenshot(path=path, full_page=True)
@@ -167,7 +154,6 @@ async def execute_web_action(
             else:
                 raise ValueError(f"Unknown action_type: {action_type}")
 
-            # Optionally save session state
             if save_state_after:
                 await hb.save_state()
 
@@ -185,10 +171,6 @@ async def execute_web_action(
         logger.error("❌ Unexpected error in headless_executor: %s", e, exc_info=True)
         return {"success": False, "data": None, "error": f"Unexpected: {e}"}
 
-
-# ---------------------------------------------------------------------------
-# Convenience: scrape raw text from a URL
-# ---------------------------------------------------------------------------
 
 async def scrape_page_text(url: str, selector: str = "body") -> str:
     """

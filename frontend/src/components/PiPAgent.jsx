@@ -20,9 +20,6 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
   const [portalContainer, setPortalContainer] = useState(null)
   const pipSupported = typeof window !== 'undefined' && 'documentPictureInPicture' in window
 
-  // -------------------------------------------------------------------
-  // Open the PiP window
-  // -------------------------------------------------------------------
   const openPiP = useCallback(async () => {
     if (!pipSupported) {
       alert(
@@ -38,19 +35,15 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
         height: 640,
       })
 
-      // Clone all stylesheets from the main document into the PiP window
-      // This ensures Tailwind and our custom CSS work inside the portal
       const mainStyles = [...document.styleSheets]
       for (const sheet of mainStyles) {
         try {
           if (sheet.href) {
-            // External stylesheet — create a <link>
             const link = pip.document.createElement('link')
             link.rel = 'stylesheet'
             link.href = sheet.href
             pip.document.head.appendChild(link)
           } else if (sheet.cssRules) {
-            // Inline <style> — clone rules
             const style = pip.document.createElement('style')
             let cssText = ''
             for (const rule of sheet.cssRules) {
@@ -60,11 +53,9 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
             pip.document.head.appendChild(style)
           }
         } catch {
-          // CORS-restricted sheet — skip silently
         }
       }
 
-      // Inject a small override for the PiP window body
       const pipOverride = pip.document.createElement('style')
       pipOverride.textContent = `
         *, *::before, *::after { box-sizing: border-box; }
@@ -87,15 +78,12 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
       `
       pip.document.head.appendChild(pipOverride)
 
-      // Set title
       pip.document.title = 'X10V — Floating Agent'
 
-      // Create a mount point inside PiP body
       const container = pip.document.createElement('div')
       container.id = 'pip-root'
       pip.document.body.appendChild(container)
 
-      // Listen for PiP window close
       pip.addEventListener('pagehide', () => {
         setPipWindow(null)
         setPortalContainer(null)
@@ -111,9 +99,6 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
     }
   }, [pipSupported, onOpen, onClose])
 
-  // -------------------------------------------------------------------
-  // Close the PiP window programmatically
-  // -------------------------------------------------------------------
   const closePiP = useCallback(() => {
     if (pipWindow) {
       pipWindow.close()
@@ -136,9 +121,6 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
     }
   }, [pipWindow])
 
-  // -------------------------------------------------------------------
-  // The "Pop Out Agent" button (rendered inline in the main dashboard)
-  // -------------------------------------------------------------------
   const triggerButton = (
     <button
       onClick={isOpen ? closePiP : openPiP}
@@ -164,13 +146,9 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
     </button>
   )
 
-  // -------------------------------------------------------------------
-  // The PiP portal content — dark themed floating widget
-  // -------------------------------------------------------------------
   const pipContent = portalContainer
     ? createPortal(
         <div className="min-h-screen bg-terminal-bg text-cream p-4 space-y-4">
-          {/* PiP Header */}
           <div className="flex items-center justify-between pb-3 border-b border-terminal-border">
             <div className="flex items-center gap-2">
               <div className="flex gap-1">
@@ -191,7 +169,6 @@ export default function PiPAgent({ isOpen, onOpen, onClose, children }) {
             </button>
           </div>
 
-          {/* Floating children — OmniInput + SwarmTerminal */}
           {children}
         </div>,
         portalContainer,

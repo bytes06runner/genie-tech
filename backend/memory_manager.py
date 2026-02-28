@@ -19,9 +19,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("memory_manager")
 
-# ---------------------------------------------------------------------------
-# Singleton ChromaDB client
-# ---------------------------------------------------------------------------
 _client: Optional[chromadb.ClientAPI] = None
 _collection: Optional[chromadb.Collection] = None
 
@@ -45,10 +42,6 @@ def _get_collection() -> chromadb.Collection:
         )
     return _collection
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def log_memory(agent_name: str, action: str) -> str:
     """
@@ -94,7 +87,6 @@ def get_relevant_context(query: str, max_tokens: int = 500) -> str:
     documents = results.get("documents", [[]])[0]
     combined = "\n".join(documents)
 
-    # Rough token budget enforcement (1 token ≈ 1 word for safety)
     tokens = combined.split()
     if len(tokens) > max_tokens:
         combined = " ".join(tokens[:max_tokens])

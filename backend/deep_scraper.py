@@ -50,19 +50,16 @@ async def deep_scrape(query: str, timeout_seconds: int = 3) -> dict:
 async def _scrape_pipeline(query: str) -> dict:
     """Internal pipeline: URL discovery → headless page load → text extraction."""
 
-    # ── Step 1: Find the best URL via DuckDuckGo ──
     url = await _find_url(query)
     if not url:
         return {"url": "", "text": "No relevant URL found for query.", "success": False}
 
     logger.info("🔗 Deep scraper target URL: %s", url)
 
-    # ── Step 2: Playwright headless extraction ──
     text = await _extract_page_text(url)
     if not text:
         return {"url": url, "text": "Page loaded but no text extracted.", "success": False}
 
-    # ── Step 3: Truncate to 2000 chars to save tokens ──
     truncated = text[:2000].strip()
     logger.info("📄 Deep scrape extracted %d chars (truncated to %d) from %s", len(text), len(truncated), url)
 
@@ -113,13 +110,8 @@ async def _extract_page_text(url: str) -> Optional[str]:
             )
             page = await context.new_page()
 
-            # Navigate with a tight timeout
             await page.goto(url, wait_until="domcontentloaded", timeout=5000)
-
-            # Small wait for dynamic content to render
             await page.wait_for_timeout(500)
-
-            # Inject JS to extract clean body text
             text = await page.evaluate("document.body.innerText")
 
             await browser.close()

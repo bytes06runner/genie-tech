@@ -11,14 +11,12 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
   const intervalRef = useRef(null)
   const viewfinderRef = useRef(null)
 
-  // Cleanup interval on unmount
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
   }, [])
 
-  // Mirror the main video stream into the viewfinder <video> element
   useEffect(() => {
     if (!viewfinderRef.current || !videoRef?.current) return
     const srcObj = videoRef.current.srcObject
@@ -30,10 +28,8 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
     }
   }, [isSharing, videoRef])
 
-  // Fire the actual submission when countdown reaches 0
   useEffect(() => {
     if (countdown === 0 && pendingCommand) {
-      // Countdown finished — fire the real submission
       setCountdown(null)
       const cmd = pendingCommand
       setPendingCommand(null)
@@ -46,9 +42,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
     e.preventDefault()
     if (!value.trim() || isProcessing || countdown !== null) return
 
-    // If screen sharing is active AND not in PiP, start 3-second delayed capture
-    // In PiP mode, the floating window solves the self-referential problem,
-    // so we can capture immediately
     if (isSharing && !isPiP) {
       const cmd = value.trim()
       setPendingCommand(cmd)
@@ -65,7 +58,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
         })
       }, 1000)
     } else {
-      // No screen share, or PiP mode (instant capture safe) — submit immediately
       const cmd = value.trim()
       setValue('')
       onSubmit(cmd)
@@ -74,7 +66,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
 
   const isLocked = isProcessing || countdown !== null
 
-  // Dynamic placeholder based on state
   const getPlaceholder = () => {
     if (countdown !== null && countdown > 0) {
       return `Switch to target tab… Capturing in [${countdown}]…`
@@ -103,7 +94,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
           </h2>
         </div>
 
-        {/* Viewfinder toggle — only shown when sharing */}
         {isSharing && (
           <button
             type="button"
@@ -117,7 +107,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
         )}
       </div>
 
-      {/* ── Live Viewfinder (Mini-Monitor) ── */}
       <AnimatePresence>
         {isSharing && showViewfinder && (
           <motion.div
@@ -128,7 +117,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
             className="overflow-hidden"
           >
             <div className="relative w-full max-w-sm">
-              {/* The live video preview */}
               <video
                 ref={viewfinderRef}
                 autoPlay
@@ -138,7 +126,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
                            object-cover shadow-[0_2px_8px_rgba(0,0,0,0.08)]"
               />
 
-              {/* Overlay label */}
               <div className="absolute top-2 left-2 flex items-center gap-1.5
                               px-2 py-0.5 rounded-md bg-terminal-bg/80 backdrop-blur-sm">
                 <span className="w-1.5 h-1.5 rounded-full bg-terminal-green pulse-soft" />
@@ -147,7 +134,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
                 </span>
               </div>
 
-              {/* Countdown flash overlay */}
               <AnimatePresence>
                 {countdown !== null && countdown > 0 && (
                   <motion.div
@@ -171,7 +157,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
                 )}
               </AnimatePresence>
 
-              {/* Capture flash */}
               <AnimatePresence>
                 {countdown === 0 && (
                   <motion.div
@@ -184,7 +169,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
               </AnimatePresence>
             </div>
 
-            {/* Hint below viewfinder */}
             <p className="text-[11px] font-sans text-charcoal-muted/50 mt-1.5 ml-0.5">
               {countdown !== null && countdown > 0
                 ? '⚠️ Verify: is this your target tab? Switch now if not!'
@@ -195,7 +179,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
       </AnimatePresence>
 
       <form onSubmit={handleSubmit} className="relative flex items-center gap-3">
-        {/* Screen Share Toggle */}
         <button
           type="button"
           onClick={isSharing ? onStopShare : onStartShare}
@@ -231,7 +214,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
                        }`}
           />
 
-          {/* Countdown overlay badge */}
           <AnimatePresence>
             {countdown !== null && countdown > 0 && (
               <motion.div
@@ -249,7 +231,6 @@ export default function OmniInput({ onSubmit, isProcessing, isSharing, isPiP, on
             )}
           </AnimatePresence>
 
-          {/* Normal submit button — hidden during countdown */}
           {countdown === null && (
             <button
               type="submit"

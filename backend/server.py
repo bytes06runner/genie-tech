@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from memory_manager import log_memory
 from swarm_brain import run_swarm, extract_vision_context
+from doc_generator import create_document
 from scheduler_node import (
     register_task,
     get_all_tasks,
@@ -36,9 +37,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("server")
 
-# ---------------------------------------------------------------------------
-# WebSocket connection manager
-# ---------------------------------------------------------------------------
 
 class ConnectionManager:
     """Manages active WebSocket connections for live terminal broadcast."""
@@ -76,10 +74,6 @@ async def ws_broadcast(message: str):
     await manager.broadcast(message)
 
 
-# ---------------------------------------------------------------------------
-# Lifespan (startup / shutdown)
-# ---------------------------------------------------------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("=" * 60)
@@ -91,10 +85,6 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("X10V Backend — Shutting down.")
 
-
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="X10V — Headless Semantic Automation",
@@ -110,10 +100,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
 
 class ScheduleTaskRequest(BaseModel):
     description: str = Field(..., example="Analyze OctaFX EUR/USD spread and execute trade")
@@ -146,10 +132,6 @@ class TaskResponse(BaseModel):
     status: str
     result: Optional[str] = None
 
-
-# ---------------------------------------------------------------------------
-# REST endpoints
-# ---------------------------------------------------------------------------
 
 @app.post("/schedule_task", response_model=dict)
 async def schedule_task(req: ScheduleTaskRequest):
@@ -185,7 +167,32 @@ async def instant_analyze(req: InstantAnalyzeRequest):
         force_vision=req.force_vision,
         broadcast=ws_broadcast,
     )
-    return {"status": "complete", "verdict": verdict}
+
+    response_payload = {"status": "complete", "verdict": verdict}
+
+    if verdict.get("generate_file") is True:
+        file_type = verdict.get("file_type", "pdf")
+        if file_type not in ("pdf", "md"):
+            file_type = "pdf"
+        try:
+            file_b64, file_mime = await create_document(
+                verdict.get("structured_data", {}), file_type,
+                domain=verdict.get("domain", "general")
+            )
+            # Derive actual file type from mime (PDF may fallback to .md)
+            actual_type = "pdf" if file_mime == "application/pdf" else "md"
+            response_payload["file_b64"] = file_b64
+            response_payload["file_mime"] = file_mime
+            response_payload["file_type"] = actual_type
+            logger.info("📄 Document generated: %s (%d b64 chars)", file_mime, len(file_b64))
+            if ws_broadcast:
+                await ws_broadcast(f"[DocGen] 📄 {actual_type.upper()} document generated — ready for download")
+        except Exception as e:
+            logger.error("📄 Document generation failed: %s", e)
+            if ws_broadcast:
+                await ws_broadcast(f"[DocGen] ⚠️ Document generation failed: {str(e)[:80]}")
+
+    return response_payload
 
 
 @app.post("/api/analyze-screen", response_model=dict)
@@ -221,11 +228,35 @@ async def analyze_screen(req: AnalyzeScreenRequest):
         broadcast=ws_broadcast,
     )
 
-    return {
+    response_payload = {
         "status": "complete",
         "vision_context": extracted_context,
         "verdict": verdict,
     }
+
+    if verdict.get("generate_file") is True:
+        file_type = verdict.get("file_type", "pdf")
+        if file_type not in ("pdf", "md"):
+            file_type = "pdf"
+        try:
+            file_b64, file_mime = await create_document(
+                verdict.get("structured_data", {}), file_type,
+                domain=verdict.get("domain", "general")
+            )
+            # Derive actual file type from mime (PDF may fallback to .md)
+            actual_type = "pdf" if file_mime == "application/pdf" else "md"
+            response_payload["file_b64"] = file_b64
+            response_payload["file_mime"] = file_mime
+            response_payload["file_type"] = actual_type
+            logger.info("📄 Document generated: %s (%d b64 chars)", file_mime, len(file_b64))
+            if ws_broadcast:
+                await ws_broadcast(f"[DocGen] 📄 {actual_type.upper()} document generated — ready for download")
+        except Exception as e:
+            logger.error("📄 Document generation failed: %s", e)
+            if ws_broadcast:
+                await ws_broadcast(f"[DocGen] ⚠️ Document generation failed: {str(e)[:80]}")
+
+    return response_payload
 
 
 @app.get("/tasks", response_model=list)
@@ -241,20 +272,14 @@ async def health():
     return {"status": "ok", "service": "X10V Backend", "version": "1.0.0"}
 
 
-# ---------------------------------------------------------------------------
-# WebSocket — live swarm terminal
-# ---------------------------------------------------------------------------
-
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     try:
         await ws.send_text("[Server] Connected to X10V Swarm Terminal ✓")
         while True:
-            # Keep alive — the frontend may also send commands in future
             data = await ws.receive_text()
             logger.info("WS received from client: %s", data[:100])
-            # Echo acknowledgement
             await ws.send_text(f"[Server] ACK: {data[:80]}")
     except WebSocketDisconnect:
         manager.disconnect(ws)
@@ -263,10 +288,6 @@ async def websocket_endpoint(ws: WebSocket):
         logger.error("WebSocket error: %s", e)
         manager.disconnect(ws)
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

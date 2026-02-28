@@ -22,9 +22,6 @@ export default function Dashboard() {
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
 
-  // ------------------------------------------------------------------
-  // WebSocket connection with auto-reconnect
-  // ------------------------------------------------------------------
   const connectWs = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
 
@@ -47,6 +44,7 @@ export default function Dashboard() {
       else if (msg.includes('[Gamma')) type = 'gamma-execute'
       else if (msg.includes('[DeepScraper]')) type = 'scraper'
       else if (msg.includes('[QueryRouter]')) type = 'router'
+      else if (msg.includes('[DocGen]')) type = 'docgen'
       else if (msg.includes('[RAG]')) type = 'rag'
       else if (msg.includes('[Scheduler|red') || msg.includes('[Scheduler] ❌')) type = 'error'
       else if (msg.includes('[Scheduler|green') || msg.includes('[Scheduler] ✅')) type = 'success'
@@ -79,9 +77,6 @@ export default function Dashboard() {
     }
   }, [connectWs])
 
-  // ------------------------------------------------------------------
-  // Helpers
-  // ------------------------------------------------------------------
   const addLog = (text, type = 'system') => {
     setLogs((prev) => [
       ...prev,
@@ -101,9 +96,6 @@ export default function Dashboard() {
     }
   }
 
-  // ------------------------------------------------------------------
-  // Screen capture
-  // ------------------------------------------------------------------
   const startScreenShare = async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -152,51 +144,75 @@ export default function Dashboard() {
     return dataUrl.split(',')[1]
   }
 
-  // ------------------------------------------------------------------
-  // Command handlers
-  // ------------------------------------------------------------------
-  // Universal verdict display for 4-key schema
-  // ------------------------------------------------------------------
+  const triggerDownload = (base64Data, mimeType, fileType) => {
+    try {
+      let cleanB64 = base64Data
+      if (cleanB64.startsWith('data:')) {
+        cleanB64 = cleanB64.split(',')[1] || cleanB64
+      }
+
+      const byteCharacters = atob(cleanB64)
+
+      const byteNumbers = new Array(byteCharacters.length)
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i)
+      }
+
+      const byteArray = new Uint8Array(byteNumbers)
+
+      const blob = new Blob([byteArray], { type: mimeType })
+
+      const blobUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = blobUrl
+      const ext = fileType === 'pdf' ? 'pdf' : 'md'
+      link.download = `X10V-Generated-Notes-${Date.now()}.${ext}`
+      document.body.appendChild(link)
+      link.click()
+
+      document.body.removeChild(link)
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1500)
+
+      addLog(`[System] 📥 ${ext.toUpperCase()} file downloaded successfully!`, 'success')
+    } catch (err) {
+      console.error('Failed to decode and download file:', err)
+      addLog(`[System] ⚠️ File download failed: ${err.message}`, 'error')
+    }
+  }
+
   const formatVerdict = (verdict) => {
     if (!verdict) {
       addLog('[System] ⚠️ No verdict returned from swarm.', 'error')
       return
     }
 
-    const { domain, action_type, rag_context_used, rich_markdown_output, reasoning } = verdict
+    const { domain, decision, structured_data, reasoning } = verdict
     const domainTag = domain ? `[${domain.toUpperCase()}]` : '[UNKNOWN]'
 
-    const actionMap = {
-      solve_exam:     { emoji: '🎓', label: 'SOLVE EXAM',     type: 'success' },
-      generate_notes: { emoji: '�', label: 'GENERATE NOTES', type: 'gamma-inform' },
-      trade_analysis: { emoji: '�', label: 'TRADE ANALYSIS', type: 'gamma-research' },
-      code_review:    { emoji: '�', label: 'CODE REVIEW',    type: 'success' },
-      general_inform: { emoji: '📋', label: 'INFORM',         type: 'gamma-inform' },
+    const decisionMap = {
+      inform:  { emoji: '📋', label: 'INFORM',  type: 'gamma-inform' },
+      execute: { emoji: '✅', label: 'EXECUTE', type: 'success' },
+      abort:   { emoji: '🛑', label: 'ABORT',   type: 'error' },
     }
 
-    const a = actionMap[action_type] || actionMap.general_inform
-    addLog(`[System] ${a.emoji} Swarm Verdict ${domainTag}: ${a.label}`, a.type)
+    const d = decisionMap[decision] || decisionMap.inform
+    addLog(`[System] ${d.emoji} Swarm Verdict ${domainTag}: ${d.label}`, d.type)
 
-    if (rich_markdown_output && rich_markdown_output !== 'No output generated.') {
-      addLog(`[Gamma/Output] ${rich_markdown_output}`, 'gamma-execute')
+    // Summary from structured_data
+    if (structured_data?.summary) {
+      addLog(`[Gamma/Output] ${structured_data.summary}`, 'gamma-execute')
     }
 
     if (reasoning) {
       addLog(`[System] 🔎 Reasoning: ${reasoning}`, 'system')
     }
-
-    if (rag_context_used && rag_context_used !== 'None' && rag_context_used !== 'none') {
-      addLog(`[RAG] 🌐 Context used: ${rag_context_used}`, 'rag')
-    }
   }
 
-  // ------------------------------------------------------------------
   const handleCommand = async (input) => {
     if (!input.trim()) return
     addLog(`[User] ${input}`, 'user')
     setIsProcessing(true)
 
-    // Detect time context → schedule, otherwise instant/vision
     const timePatterns = /\b(at\s+\d{1,2}[:.]\d{2}|at\s+\d{1,2}\s*(am|pm)|tomorrow|tonight|schedule)\b/i
     const hasTimeContext = timePatterns.test(input)
 
@@ -232,6 +248,10 @@ export default function Dashboard() {
     })
     const data = await res.json()
     formatVerdict(data.verdict)
+
+    if (data.file_b64 && data.file_mime) {
+      triggerDownload(data.file_b64, data.file_mime, data.file_type || 'pdf')
+    }
   }
 
   const handleScheduleTask = async (input) => {
@@ -282,11 +302,12 @@ export default function Dashboard() {
     })
     const data = await res.json()
     formatVerdict(data.verdict)
+
+    if (data.file_b64 && data.file_mime) {
+      triggerDownload(data.file_b64, data.file_mime, data.file_type || 'pdf')
+    }
   }
 
-  // ------------------------------------------------------------------
-  // Shared OmniInput + SwarmTerminal for both inline and PiP rendering
-  // ------------------------------------------------------------------
   const commandCenter = (
     <div className="space-y-6">
       <OmniInput
@@ -302,16 +323,11 @@ export default function Dashboard() {
     </div>
   )
 
-  // ------------------------------------------------------------------
-  // Render
-  // ------------------------------------------------------------------
   return (
     <div className="min-h-screen bg-cream">
-      {/* Hidden canvas for screen capture (video is now visible via OmniInput viewfinder) */}
       <video ref={videoRef} className="hidden" muted playsInline />
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Header */}
       <motion.header
         initial={{ opacity: 0, y: -20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -334,7 +350,6 @@ export default function Dashboard() {
           </div>
 
           <div className="flex items-center gap-4">
-            {/* PiP Pop-Out Button */}
             <PiPAgent
               isOpen={isPiP}
               onOpen={() => setIsPiP(true)}
@@ -373,9 +388,7 @@ export default function Dashboard() {
         </div>
       </motion.header>
 
-      {/* Main content */}
       <main className="mx-auto max-w-6xl px-8 py-10 space-y-10">
-        {/* Omni-Input + Terminal — only shown inline when PiP is NOT active */}
         {!isPiP ? (
           <>
             <motion.div
@@ -403,7 +416,6 @@ export default function Dashboard() {
             </motion.div>
           </>
         ) : (
-          /* PiP active — show a placeholder in the main dashboard */
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -426,7 +438,6 @@ export default function Dashboard() {
           </motion.div>
         )}
 
-        {/* Task Queue */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -436,7 +447,6 @@ export default function Dashboard() {
         </motion.div>
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-charcoal/5 py-6 text-center">
         <p className="text-xs font-sans text-charcoal-muted tracking-wide">
           X10V · Built with FastAPI, Playwright, APScheduler · Multi-Agent Swarm Consensus

@@ -22,15 +22,9 @@ from groq import Groq
 load_dotenv()
 logger = logging.getLogger("query_engine")
 
-# ---------------------------------------------------------------------------
-# Client — stateless singleton
-# ---------------------------------------------------------------------------
 _groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 _ROUTER_MODEL = "llama-3.1-8b-instant"
 
-# ---------------------------------------------------------------------------
-# System prompt for the routing agent
-# ---------------------------------------------------------------------------
 _ROUTER_SYSTEM = (
     "You are a routing agent for an AI automation platform. Your ONLY job is to "
     "decide whether live internet data is needed to answer the user's request.\n\n"
@@ -64,7 +58,6 @@ def route_query(user_command: str, screen_text: str) -> str:
     """
     logger.info("🧭 Query Router — classifying intent …")
 
-    # Build LOCAL prompt — no global state
     local_prompt = (
         f"=== USER COMMAND ===\n{user_command}\n=== END COMMAND ===\n\n"
         f"=== SCREEN TEXT (first 600 chars) ===\n{screen_text[:600]}\n=== END SCREEN TEXT ===\n\n"
@@ -84,7 +77,6 @@ def route_query(user_command: str, screen_text: str) -> str:
         )
         raw = resp.choices[0].message.content.strip()
 
-        # Normalize — strip quotes, periods, extra whitespace
         cleaned = raw.strip("\"'`.!").strip()
 
         if "NO_SEARCH_NEEDED" in cleaned.upper():
@@ -95,15 +87,11 @@ def route_query(user_command: str, screen_text: str) -> str:
         words = cleaned.split()
         if len(words) > 8:
             cleaned = " ".join(words[:6])
-        if len(words) < 2:
-            # Too short — fall back to extracting from screen text
-            logger.warning("🧭 Router returned too-short query: '%s'. Passing through.", cleaned)
 
         logger.info("🧭 Router verdict: SEARCH → '%s'", cleaned)
         return cleaned
 
     except Exception as e:
         logger.error("🧭 Query Router FAILED: %s — defaulting to search mode", e)
-        # On failure, fall back to the old regex-based extraction
         from live_rag import extract_search_query
         return extract_search_query(screen_text, user_command)
