@@ -109,18 +109,50 @@ DEFAULT_ALLOCATION = 100.0
 
 _bot_app = None
 
+
+def _sanitize_markdown(text: str) -> str:
+    """
+    Sanitize text for Telegram Markdown (v1) parse mode.
+    Escapes characters that break Markdown parsing when they appear
+    in dynamic content like RSS feed titles/summaries.
+    Strategy: remove orphaned/unbalanced markdown markers instead of
+    blindly escaping everything (which would make the text ugly).
+    """
+    # Fix unbalanced backticks — if odd number, remove all
+    if text.count('`') % 2 != 0:
+        text = text.replace('`', '')
+    # Fix unbalanced bold markers
+    if text.count('*') % 2 != 0:
+        text = text.replace('*', '')
+    # Fix unbalanced italic markers (underscores)
+    if text.count('_') % 2 != 0:
+        text = text.replace('_', '')
+    # Fix unmatched square brackets (breaks link syntax)
+    if text.count('[') != text.count(']'):
+        text = text.replace('[', '(').replace(']', ')')
+    return text
+
+
 async def tg_notify(tg_id: int, text: str):
     """Push a message to a Telegram user from any module."""
     global _bot_app
     if _bot_app and _bot_app.bot:
+        # Try Markdown first, fall back to plain text on parse error
         try:
             await _bot_app.bot.send_message(
                 chat_id=tg_id,
-                text=text,
+                text=_sanitize_markdown(text),
                 parse_mode=ParseMode.MARKDOWN,
             )
-        except Exception as e:
-            logger.error("tg_notify failed for %d: %s", tg_id, e)
+        except Exception:
+            # Markdown failed — send as plain text (never loses the message)
+            try:
+                await _bot_app.bot.send_message(
+                    chat_id=tg_id,
+                    text=text,
+                )
+            except Exception as e:
+                logger.error("tg_notify failed for %d: %s", tg_id, e)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1262,6 +1294,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.strip()
+
+    # ── Guard: reject any message starting with / (command that leaked through) ──
+    if text.startswith("/"):
+        logger.warning("handle_text received command-like message: %r — ignoring", text[:60])
+        return
+
     lower = text.lower()
 
     # Intent detection patterns
@@ -1308,7 +1346,11 @@ async def _swarm_chat(update: Update, tg_id: int, text: str):
             for m in metrics[:6]:
                 response += f"  • *{m.get('key', '')}:* {m.get('value', '')}\n"
 
-        await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+        response = _sanitize_markdown(response)
+        try:
+            await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            await update.message.reply_text(response)
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
