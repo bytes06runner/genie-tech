@@ -10,6 +10,7 @@
 import { useRef } from 'react'
 import { BackgroundPaths } from '@/components/ui/background-paths'
 import Dashboard from './components/Dashboard'
+import ArchitectureDoc from './components/ArchitectureDoc'
 
 function App() {
   const dashRef = useRef(null)
@@ -33,6 +34,9 @@ function App() {
       <div ref={dashRef}>
         <Dashboard />
       </div>
+
+      {/* Architecture & Documentation — bottom of page */}
+      <ArchitectureDoc />
     </div>
   )
 }

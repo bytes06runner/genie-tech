@@ -481,7 +481,7 @@ export default function Dashboard() {
 
       <footer className="border-t border-charcoal/5 py-6 text-center">
         <p className="text-xs font-sans text-charcoal-muted tracking-wide">
-          X10V · Omni-Channel Autonomous Financial Agent · Voice AI + YouTube Research + Groww Mock + Telegram Bridge
+          X10V · Omni-Channel Autonomous Intelligence Agent · Scroll down for full architecture documentation ↓
         </p>
       </footer>
     </div>
