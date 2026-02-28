@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -683,9 +684,7 @@ Return ONLY valid JSON:
         max_tokens=800,
     )
     raw = resp.choices[0].message.content
-    json_start = raw.find('{')
-    json_end = raw.rfind('}') + 1
-    return json.loads(raw[json_start:json_end])
+    return _safe_parse_json(raw)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -723,6 +722,57 @@ Examples:
         max_tokens=300,
     )
     raw = resp.choices[0].message.content
-    json_start = raw.find('{')
+    return _safe_parse_json(raw)
+
+
+def _safe_parse_json(raw: str) -> dict:
+    """
+    Robustly extract JSON from LLM output that may have extra text,
+    markdown fences, or trailing content after the JSON.
+    """
+    # Strip markdown code fences
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```\s*$', '', raw)
+
+    # Try parsing the whole string first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+
+    # Find the first { and try to match its closing }
+    start = raw.find('{')
+    if start < 0:
+        raise ValueError("No JSON object found in response")
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(raw)):
+        c = raw[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\':
+            escape = True
+            continue
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(raw[start:i+1])
+                except json.JSONDecodeError:
+                    continue
+
+    # Last resort: naive approach
     json_end = raw.rfind('}') + 1
-    return json.loads(raw[json_start:json_end])
+    return json.loads(raw[start:json_end])
