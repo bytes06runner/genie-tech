@@ -127,10 +127,11 @@ async def cmd_connect_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("⚠️ Use `/start` first to create your profile.", parse_mode=ParseMode.MARKDOWN)
         return
 
+    connect_url = f"{WEBAPP_URL}?mode=connect"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             text="🔗 Connect Lute Wallet",
-            web_app=WebAppInfo(url=WEBAPP_URL),
+            web_app=WebAppInfo(url=connect_url),
         )],
     ])
 
@@ -464,10 +465,11 @@ async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
         return
 
+    transact_url = f"{WEBAPP_URL}?mode=transact"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
             text="⚡ Open Algorand Bridge",
-            web_app=WebAppInfo(url=WEBAPP_URL),
+            web_app=WebAppInfo(url=transact_url),
         )],
     ])
 

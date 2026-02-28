@@ -1,10 +1,15 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useWallet } from '@txnlab/use-wallet-react'
 import algosdk from 'algosdk'
 import { getAccountBalance, buildPaymentTxn, waitForConfirmation, DUMMY_RECEIVER, algodClient } from './algorand'
 import AlgorandProvider from './AlgorandProvider'
 
 const tg = window.Telegram?.WebApp
+
+function getAppMode() {
+  const params = new URLSearchParams(window.location.search)
+  return params.get('mode') || 'transact'
+}
 
 function WalletBridge() {
   const { wallets, activeWallet, activeAccount, signTransactions } = useWallet()
@@ -13,7 +18,9 @@ function WalletBridge() {
   const [txId, setTxId] = useState(null)
   const [loading, setLoading] = useState(false)
   const [sendAmount, setSendAmount] = useState('0.1')
-  const [addressSent, setAddressSent] = useState(false)
+  const [connectStatus, setConnectStatus] = useState(null)
+  const dataSentRef = useRef(false)
+  const appMode = getAppMode()
 
   useEffect(() => {
     if (tg) {
@@ -24,21 +31,30 @@ function WalletBridge() {
   }, [])
 
   useEffect(() => {
-    if (activeAccount?.address) {
-      refreshBalance()
-
-      if (tg && !addressSent) {
-        setAddressSent(true)
-        tg.sendData(JSON.stringify({
-          action: 'wallet_connected',
-          address: activeAccount.address,
-        }))
-        tg.close()
-      }
-    } else {
+    if (!activeAccount?.address) {
       setBalance(null)
+      return
     }
-  }, [activeAccount, addressSent])
+
+    refreshBalance()
+
+    if (appMode === 'connect' && tg && !dataSentRef.current) {
+      dataSentRef.current = true
+      setConnectStatus('sending')
+      setTimeout(() => {
+        try {
+          tg.sendData(JSON.stringify({
+            action: 'wallet_connected',
+            address: activeAccount.address,
+          }))
+          tg.close()
+        } catch (err) {
+          console.error('sendData failed:', err)
+          setConnectStatus('error')
+        }
+      }, 300)
+    }
+  }, [activeAccount])
 
   const refreshBalance = useCallback(async () => {
     if (!activeAccount?.address) return
@@ -49,9 +65,11 @@ function WalletBridge() {
   const handleConnect = async (wallet) => {
     try {
       setTxStatus(null)
+      setConnectStatus('connecting')
       await wallet.connect()
     } catch (err) {
       console.error('Connect failed:', err)
+      setConnectStatus(null)
       setTxStatus(`Connection failed: ${err.message}`)
     }
   }
@@ -127,24 +145,49 @@ function WalletBridge() {
           <h1 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-cyan-400 bg-clip-text text-transparent">
             X10V Web3 Bridge
           </h1>
-          <p className="text-tg-hint text-sm mt-1">Algorand TestNet → Lute Wallet</p>
+          <p className="text-tg-hint text-sm mt-1">
+            {appMode === 'connect' ? 'Connect your Lute Wallet' : 'Algorand TestNet → Lute Wallet'}
+          </p>
         </div>
 
+        {/* Connect-mode status overlay */}
+        {appMode === 'connect' && connectStatus === 'sending' && (
+          <div className="fade-in bg-tg-secondary rounded-xl p-6 border border-green-900/50 text-center">
+            <p className="text-lg font-semibold text-green-400 mb-2">✅ Wallet Connected!</p>
+            <p className="text-sm text-tg-hint">Sending address to bot…</p>
+            <p className="text-xs font-mono break-all mt-3 bg-black/30 rounded-lg p-2">
+              {activeAccount?.address}
+            </p>
+          </div>
+        )}
+
+        {appMode === 'connect' && connectStatus === 'error' && (
+          <div className="fade-in bg-red-950/30 rounded-xl p-6 border border-red-800 text-center">
+            <p className="text-lg font-semibold text-red-400 mb-2">⚠️ Could not send to bot</p>
+            <p className="text-sm text-tg-hint">Your address: <code className="text-xs">{activeAccount?.address}</code></p>
+            <p className="text-xs text-tg-hint mt-2">Copy it manually and send to the bot chat.</p>
+          </div>
+        )}
+
         {/* Wallet Connection */}
-        {!activeAccount ? (
+        {!activeAccount && connectStatus !== 'sending' ? (
           <div className="fade-in space-y-3">
             <div className="bg-tg-secondary rounded-xl p-5 border border-gray-800">
               <h2 className="text-lg font-semibold mb-3">Connect Wallet</h2>
               <p className="text-tg-hint text-sm mb-4">
-                Connect your Lute wallet to sign Algorand TestNet transactions directly from Telegram.
+                {appMode === 'connect'
+                  ? 'Connect your Lute wallet to link it with the X10V bot.'
+                  : 'Connect your Lute wallet to sign Algorand TestNet transactions directly from Telegram.'}
               </p>
               {luteWallet ? (
                 <button
                   onClick={() => handleConnect(luteWallet)}
+                  disabled={connectStatus === 'connecting'}
                   className="w-full py-3 px-4 bg-tg-button text-tg-buttonText font-semibold rounded-xl
-                             hover:opacity-90 active:scale-[0.98] transition-all duration-150 pulse-glow"
+                             hover:opacity-90 active:scale-[0.98] transition-all duration-150 pulse-glow
+                             disabled:opacity-60"
                 >
-                  🔗 Connect Lute Wallet
+                  {connectStatus === 'connecting' ? '⏳ Connecting to Lute …' : '🔗 Connect Lute Wallet'}
                 </button>
               ) : (
                 <div className="space-y-2">
@@ -171,7 +214,7 @@ function WalletBridge() {
               </ul>
             </div>
           </div>
-        ) : (
+        ) : activeAccount && appMode === 'transact' ? (
           <div className="fade-in space-y-4">
             {/* Connected Wallet Info */}
             <div className="bg-tg-secondary rounded-xl p-4 border border-green-900/50">
@@ -276,7 +319,7 @@ function WalletBridge() {
               </span>
             </div>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   )
