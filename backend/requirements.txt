@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+playwright==1.49.1
+apscheduler==3.10.4
+chromadb==0.5.23
+groq==0.13.1
+python-dotenv==1.0.1
+websockets==14.1
+pydantic==2.10.4
+duckduckgo-search==7.5.1
