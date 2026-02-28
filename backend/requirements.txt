@@ -11,3 +11,6 @@ pydantic==2.10.4
 duckduckgo-search==7.5.1
 markdown==3.7
 weasyprint==62.3
+python-telegram-bot==21.3
+yfinance==0.2.36
+py-algorand-sdk==2.6.1

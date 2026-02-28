@@ -178,6 +178,16 @@ GAMMA_SYSTEM = (
     "  • execute  — actionable recommendation (trade, deploy code, submit answer)\n"
     "  • abort    — data is insufficient, self-referential, or contradictory\n\n"
 
+    "═══ FINANCE TRADING EXTENSION ═══\n"
+    "When domain='finance', you MUST also include these EXTRA keys in your JSON:\n"
+    '  "trade_decision": "monitor_and_execute" | "execute_now" | "inform",\n'
+    '  "asset_ticker": "e.g. XAUUSD, BTC, AAPL, NSE:RELIANCE",\n'
+    '  "target_entry_price": <number or null>,\n'
+    "  • monitor_and_execute — price hasn't reached ideal entry yet; set target_entry_price\n"
+    "  • execute_now — conditions are favorable, trade immediately at market price\n"
+    "  • inform — just presenting data, no trade action\n"
+    "If domain is NOT finance, omit these extra keys.\n\n"
+
     "FILE GENERATION RULES:\n"
     "  • Set generate_file to true ONLY IF the user explicitly asks for a file, "
     "PDF, document, download, export, or notes file.\n"
