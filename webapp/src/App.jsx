@@ -263,6 +263,8 @@ ${(window.__bootLogs || []).join('\n')}`}
 }
 
 // ─── Sign Swap Mode: DeFi Agent unsigned transaction signing ─────
+const HARDCODED_SENDER = 'NEIQN3C2UPPWEX7PT67JQGZACSGDDFQR4AZCY6WFVEWQ43YJW3JQT6RIWU'
+
 function SignSwapMode() {
   const [status, setStatus] = useState('loading') // loading | ready | signing | success | error
   const [txData, setTxData] = useState(null)
@@ -312,14 +314,17 @@ function SignSwapMode() {
     try {
       log('Building transaction from pending TX data...')
 
-      // Reconstruct the transaction using algosdk
+      // Use hardcoded sender address for Lute wallet on TestNet
+      const sender = txData.sender || HARDCODED_SENDER
+
+      // Reconstruct the PaymentTxn using algosdk
       const suggestedParams = await algodClient.getTransactionParams().do()
       const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
-        from: txData.sender,
+        from: sender,
         to: txData.receiver,
         amount: Math.floor(txData.amount_algo * 1e6),
         suggestedParams,
-        note: new Uint8Array(Buffer.from(txData.note || 'X10V DeFi Agent Swap')),
+        note: new Uint8Array(Buffer.from(txData.note || 'X10V DeFi Agent Protective Transfer')),
       })
 
       log('Transaction built. Requesting Lute wallet signature...')
@@ -373,7 +378,7 @@ function SignSwapMode() {
         sentRef.current = true
         setTimeout(() => {
           const data = JSON.stringify({
-            action: 'swap_signed',
+            action: 'onchain_action_signed',
             ptx_id: ptxId,
             tx_id: confirmedTxId,
             amount_algo: txData.amount_algo,
@@ -407,10 +412,10 @@ function SignSwapMode() {
       <div style={S.page}>
         <div style={{ ...S.card, borderColor: '#238636', maxWidth: 420, width: '100%' }}>
           <p style={{ fontSize: 48, textAlign: 'center' }}>✅</p>
-          <h2 style={{ color: '#3FB950', margin: '8px 0', textAlign: 'center' }}>Swap Executed!</h2>
+          <h2 style={{ color: '#3FB950', margin: '8px 0', textAlign: 'center' }}>Transfer Executed!</h2>
           <p style={{ fontSize: 13, color: '#8B949E', textAlign: 'center' }}>Transaction confirmed on Algorand TestNet</p>
           <div style={S.mono}>
-            <p style={{ margin: '4px 0' }}>💱 {txData?.amount_algo} ALGO → USDC</p>
+            <p style={{ margin: '4px 0' }}>� {txData?.amount_algo} ALGO → Safe Vault</p>
             <p style={{ margin: '4px 0', fontSize: 10, wordBreak: 'break-all' }}>TX: {txId}</p>
           </div>
           <a
@@ -432,9 +437,9 @@ function SignSwapMode() {
         {/* Header */}
         <div style={{ textAlign: 'center', padding: '12px 0 20px', borderBottom: '1px solid #21262D' }}>
           <h1 style={{ fontSize: 20, fontWeight: 800, background: 'linear-gradient(90deg,#F85149,#FF7B72)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', margin: 0 }}>
-            🚨 DeFi Agent — Swap Approval
+            🚨 DeFi Agent — Protective Transfer
           </h1>
-          <p style={{ fontSize: 12, color: '#8B949E', marginTop: 6 }}>Review and sign the autonomous swap</p>
+          <p style={{ fontSize: 12, color: '#8B949E', marginTop: 6 }}>Review and sign the autonomous transfer</p>
         </div>
 
         {/* Transaction details card */}
@@ -442,10 +447,10 @@ function SignSwapMode() {
           <div style={{ ...S.card, margin: '20px 0 16px', borderColor: '#F85149' }}>
             <h3 style={{ fontSize: 14, margin: '0 0 12px', color: '#FF7B72' }}>📋 Transaction Details</h3>
             <div style={{ fontSize: 12, color: '#E6EDF3', lineHeight: 2 }}>
-              <p>💱 <strong>Swap:</strong> {txData.amount_algo} ALGO → USDC</p>
-              <p>📤 <strong>From:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{txData.sender?.slice(0, 20)}…</span></p>
+              <p>� <strong>Transfer:</strong> {txData.amount_algo} ALGO → Safe Vault</p>
+              <p>📤 <strong>From:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{(txData.sender || HARDCODED_SENDER)?.slice(0, 20)}…</span></p>
               <p>📥 <strong>To:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{txData.receiver?.slice(0, 20)}…</span></p>
-              <p>📝 <strong>Reason:</strong> {txData.note || 'DeFi Agent Swap'}</p>
+              <p>📝 <strong>Reason:</strong> {txData.note || 'DeFi Agent Protective Transfer'}</p>
               <p>🆔 <strong>ID:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{ptxId}</span></p>
             </div>
           </div>
@@ -469,7 +474,7 @@ function SignSwapMode() {
                 background: 'linear-gradient(90deg,#F85149,#DA3633)',
               }}
             >
-              🔐 Sign & Execute Swap
+              🔐 Sign & Execute Transfer
             </button>
             <button
               onClick={() => { if (tg) tg.close(); else window.close() }}

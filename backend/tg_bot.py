@@ -97,6 +97,7 @@ from algorand_indexer import (
     get_pending_transaction,
     mark_transaction_signed,
     get_user_pending_transactions,
+    DEFAULT_SENDER,
 )
 
 load_dotenv()
@@ -168,56 +169,55 @@ async def tg_send_swap_prompt(
     tg_id: int,
     pending_tx_id: str,
     amount_algo: float,
-    reason: str = "",
-    sentiment_label: str = "⚠️ Market Signal",
+    reason: str,
+    sentiment_label: str,
 ):
     """
-    Send an inline keyboard to the user with Approve/Reject buttons
-    for a pending DeFi swap transaction.
+    Send an Inline Keyboard Button to Telegram with a protective transfer
+    approval prompt. When clicked, opens the Mini App with the unsigned
+    transaction details for signing via Lute Wallet.
     """
     global _bot_app
-    if not (_bot_app and _bot_app.bot):
-        logger.error("Cannot send swap prompt: bot not initialized")
+    if not _bot_app or not _bot_app.bot:
+        logger.error("Cannot send swap prompt — bot not initialized")
         return
 
-    # Mini App URL for signing the swap
-    sign_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={pending_tx_id}&_t={int(_time.time())}"
-
+    swap_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={pending_tx_id}&_t={int(_time.time())}"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            text=f"✅ Approve & Sign ({amount_algo} ALGO)",
-            web_app=WebAppInfo(url=sign_url),
+            text=f"🔐 Approve & Sign ({amount_algo} ALGO)",
+            web_app=WebAppInfo(url=swap_url),
         )],
         [InlineKeyboardButton(
-            text="❌ Reject Swap",
+            text="❌ Reject Transfer",
             callback_data=f"reject_swap:{pending_tx_id}",
         )],
     ])
 
     text = (
-        f"🚨 *DeFi Agent — Swap Proposal*\n\n"
-        f"📊 {sentiment_label}\n\n"
-        f"💱 *{amount_algo} ALGO → USDC*\n"
-        f"📝 _{reason}_\n\n"
-        f"🆔 `{pending_tx_id}`\n\n"
-        f"Tap *Approve & Sign* to open your Lute wallet and sign the transaction, "
-        f"or *Reject* to cancel."
+        f"🚨 *DeFi Agent — Protective Transfer*\n\n"
+        f"*{sentiment_label}*\n\n"
+        f"📊 *Reason:* {_sanitize_markdown(reason)}\n"
+        f"💰 *Amount:* `{amount_algo} ALGO` → Safe Vault\n"
+        f"🆔 *TX ID:* `{pending_tx_id}`\n\n"
+        f"Tap below to review & sign in your Lute Wallet, "
+        f"or reject to cancel."
     )
 
     try:
         await _bot_app.bot.send_message(
             chat_id=tg_id,
-            text=_sanitize_markdown(text),
+            text=text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboard,
         )
-        logger.info("📤 Swap prompt sent to user %d for TX %s", tg_id, pending_tx_id)
+        logger.info("✅ Swap prompt sent to user %d — PTX: %s", tg_id, pending_tx_id)
     except Exception as e:
-        logger.error("Failed to send swap prompt to %d: %s", tg_id, e)
+        logger.error("Failed to send swap prompt: %s", e)
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline keyboard button presses (e.g., Reject Swap)."""
+    """Handle inline keyboard callback queries (e.g., reject transfer)."""
     query = update.callback_query
     await query.answer()
 
@@ -237,84 +237,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 await db.commit()
         except Exception as e:
-            logger.error("Failed to reject swap %s: %s", ptx_id, e)
+            logger.error("Failed to reject transfer %s: %s", ptx_id, e)
 
         await query.edit_message_text(
-            f"❌ *Swap Rejected*\n\nTransaction `{ptx_id}` has been cancelled.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        logger.info("❌ User rejected swap %s", ptx_id)
-
-    else:
-        logger.warning("Unknown callback data: %s", data[:60])
-
-
-async def tg_send_swap_prompt(
-    tg_id: int,
-    pending_tx_id: str,
-    amount_algo: float,
-    reason: str,
-    sentiment_label: str,
-):
-    """
-    Send an Inline Keyboard Button to Telegram with a swap approval prompt.
-    When clicked, opens the Mini App with the unsigned transaction details.
-    """
-    global _bot_app
-    if not _bot_app or not _bot_app.bot:
-        logger.error("Cannot send swap prompt — bot not initialized")
-        return
-
-    swap_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={pending_tx_id}&_t={int(_time.time())}"
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            text=f"🔐 Approve & Sign Swap ({amount_algo} ALGO)",
-            web_app=WebAppInfo(url=swap_url),
-        )],
-        [InlineKeyboardButton(
-            text="❌ Reject Swap",
-            callback_data=f"reject_swap:{pending_tx_id}",
-        )],
-    ])
-
-    text = (
-        f"🚨 *DeFi Agent — Swap Proposal*\n\n"
-        f"*{sentiment_label}*\n\n"
-        f"📊 *Reason:* {_sanitize_markdown(reason)}\n"
-        f"💰 *Amount:* `{amount_algo} ALGO` → USDC\n"
-        f"🆔 *TX ID:* `{pending_tx_id}`\n\n"
-        f"Tap below to review & sign in your Lute Wallet, "
-        f"or reject to cancel."
-    )
-
-    try:
-        await _bot_app.bot.send_message(
-            chat_id=tg_id,
-            text=text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard,
-        )
-        logger.info("✅ Swap prompt sent to user %d — PTX: %s", tg_id, pending_tx_id)
-    except Exception as e:
-        logger.error("Failed to send swap prompt: %s", e)
-
-
-async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline keyboard callback queries (e.g., reject swap)."""
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data or ""
-
-    if data.startswith("reject_swap:"):
-        ptx_id = data.split(":", 1)[1]
-        await query.edit_message_text(
-            f"❌ *Swap Rejected*\n\n"
+            f"❌ *Transfer Rejected*\n\n"
             f"Transaction `{ptx_id}` was cancelled.\n"
             f"No funds were moved.",
             parse_mode=ParseMode.MARKDOWN,
         )
-        logger.info("❌ User %d rejected swap %s", update.effective_user.id, ptx_id)
+        logger.info("❌ User %d rejected transfer %s", update.effective_user.id, ptx_id)
     else:
         logger.warning("Unknown callback query: %s", data)
 
@@ -1188,20 +1119,20 @@ async def cmd_whale_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_pending_swaps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List pending unsigned swap transactions waiting for user approval."""
+    """List pending unsigned transactions waiting for user approval."""
     tg_id = update.effective_user.id
     pending = await get_user_pending_transactions(tg_id)
 
     if not pending:
-        await update.message.reply_text("✅ No pending swap transactions.")
+        await update.message.reply_text("✅ No pending transactions.")
         return
 
-    text = f"🔔 *Pending Swaps ({len(pending)}):*\n\n"
+    text = f"🔔 *Pending Transfers ({len(pending)}):*\n\n"
     for p in pending[:5]:
         swap_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={p['id']}&_t={int(_time.time())}"
         text += (
             f"🆔 `{p['id']}`\n"
-            f"💰 {p['amount_algo']} ALGO → USDC\n"
+            f"💰 {p['amount_algo']} ALGO → Safe Vault\n"
             f"📝 {p['note'][:60]}\n"
             f"🕐 {p['created_at'][:16]}\n\n"
         )

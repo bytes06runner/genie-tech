@@ -8,7 +8,7 @@ Telegram-native execution. Supports:
                      on_chain_event (Algorand Indexer whale alerts)
   • Action Nodes   — send_message, ai_analyze, web_scrape, fetch_rss, stock_lookup,
                      youtube_research, execute_trade, api_call, analyze_sentiment,
-                     execute_dex_swap
+                     execute_onchain_action
   • Condition Nodes — if/else branching based on variables
   • Workflow DAG    — multi-step pipelines with variable passing
 
@@ -451,9 +451,9 @@ async def execute_action_node(action: dict, variables: dict) -> dict:
                 }
                 logger.info("📊 Sentiment analysis: %s (score=%s)", sentiment, score)
 
-        elif action_type == "execute_dex_swap":
-            # ── NEW: Build unsigned Algorand TX + trigger Telegram approval prompt ──
-            from algorand_indexer import execute_dex_swap_action
+        elif action_type == "execute_onchain_action":
+            # ── Build unsigned Algorand protective transfer + trigger Telegram approval ──
+            from algorand_indexer import execute_onchain_action
             from paper_engine import get_user
 
             tg_id = config.get("tg_id") or variables.get("_tg_id")
@@ -471,7 +471,7 @@ async def execute_action_node(action: dict, variables: dict) -> dict:
 
             reason = _interpolate(config.get("reason", "Autonomous DeFi Agent swap"), variables)
 
-            # Get user's connected wallet
+            # Get user's connected wallet (or fall back to hardcoded TestNet sender)
             user = await get_user(int(tg_id)) if tg_id else None
             sender_address = user.get("algo_address", "") if user else ""
 
@@ -483,7 +483,7 @@ async def execute_action_node(action: dict, variables: dict) -> dict:
                 except Exception:
                     pass
 
-            swap_result = await execute_dex_swap_action(
+            swap_result = await execute_onchain_action(
                 tg_id=int(tg_id),
                 sender_address=sender_address,
                 amount_algo=amount_algo,
@@ -493,7 +493,7 @@ async def execute_action_node(action: dict, variables: dict) -> dict:
 
             result = {
                 "success": swap_result.get("success", False),
-                "output": swap_result.get("output", "Swap action failed"),
+                "output": swap_result.get("output", "On-chain action failed"),
                 "pending_tx_id": swap_result.get("pending_tx_id"),
             }
 
@@ -875,7 +875,7 @@ async def parse_workflow_from_nl(text: str, tg_id: int) -> dict:
         "CRITICAL RULES:\n"
         "1. If the user's request involves news/headlines/articles → use \"fetch_rss\" with a real RSS URL. NEVER \"web_scrape\".\n"
         "2. If the user wants sentiment analysis → chain fetch_rss → analyze_sentiment.\n"
-        "3. If the user wants autonomous trading/swaps based on sentiment → chain: fetch_rss → analyze_sentiment → execute_dex_swap.\n"
+        "3. If the user wants autonomous trading/swaps based on sentiment → chain: fetch_rss → analyze_sentiment → execute_onchain_action.\n"
         "4. For on-chain whale detection → use trigger_type \"on_chain_event\".\n"
         "5. Steps reference previous step output via {{step_N_output}} variables."
     )
@@ -900,10 +900,11 @@ User request: "{text}"
 2. "analyze_sentiment": LLM sentiment analysis of text (usually RSS output). Returns bearish/bullish/neutral + score 0-100.
    config: {{"text": "{{{{step_N_output}}}}"}}  (leave empty to auto-use previous step output)
 
-3. "execute_dex_swap": Build unsigned ALGO→USDC swap & send Telegram approval button.
-   config: {{"amount_algo": 2.0, "reason": "Bearish sentiment protection", "tg_id": {tg_id}, "dynamic_amount": true, "bearish_amount": 5.0, "cautious_amount": 2.0}}
+3. "execute_onchain_action": Build unsigned protective ALGO transfer & send Telegram approval button.
+   config: {{"amount_algo": 1.0, "reason": "Bearish sentiment — protective transfer to safe vault", "tg_id": {tg_id}, "dynamic_amount": true, "bearish_amount": 5.0, "cautious_amount": 2.0}}
    - If dynamic_amount=true: amount scales based on sentiment score (bearish=bearish_amount, cautious=cautious_amount)
-   - User must have /connect_wallet linked. They approve the swap in the Mini App.
+   - Constructs an unsigned PaymentTxn with sender NEIQN3C2UPPWEX7PT67JQGZACSGDDFQR4AZCY6WFVEWQ43YJW3JQT6RIWU
+   - User MUST approve & sign in the Lute Wallet Mini App. Bot NEVER signs.
 
 4. "ai_analyze": Run AI swarm analysis. config: {{"prompt": "what to analyze"}}
 5. "stock_lookup": Get stock price data. config: {{"ticker": "AAPL"}}
@@ -925,16 +926,16 @@ User request: "{text}"
 
 ═══ EXAMPLE PIPELINES ═══
 
-EXAMPLE 1 — "Fetch crypto news, analyze sentiment, and swap if bearish":
+EXAMPLE 1 — "Fetch crypto news, analyze sentiment, and execute protective transfer if bearish":
 {{
   "name": "DeFi Sentiment Guard",
-  "description": "Monitors crypto news, analyzes sentiment, triggers protective swap if bearish",
+  "description": "Monitors crypto news, analyzes sentiment, triggers protective ALGO transfer if bearish",
   "trigger_type": "interval",
   "trigger_config": {{"interval_minutes": 30}},
   "steps": [
     {{"name": "Fetch Crypto News", "type": "fetch_rss", "config": {{"feed_url": "https://cointelegraph.com/rss", "max_items": 5}}}},
     {{"name": "Analyze Sentiment", "type": "analyze_sentiment", "config": {{}}}},
-    {{"name": "Execute Swap", "type": "execute_dex_swap", "config": {{"amount_algo": 2.0, "reason": "Bearish news detected — protective ALGO→USDC swap", "tg_id": {tg_id}, "dynamic_amount": true, "bearish_amount": 5.0, "cautious_amount": 2.0}}}}
+    {{"name": "Protective Transfer", "type": "execute_onchain_action", "config": {{"amount_algo": 1.0, "reason": "Bearish news detected — protective ALGO transfer to safe vault", "tg_id": {tg_id}, "dynamic_amount": true, "bearish_amount": 5.0, "cautious_amount": 2.0}}}}
   ]
 }}
 
@@ -965,7 +966,7 @@ EXAMPLE 3 — "Every 10 minutes fetch crypto news and send it to me":
 RULES:
 - For ANY request involving "news", "headlines", "articles", "updates", "latest" → use "fetch_rss". NEVER "web_scrape".
 - For sentiment/mood/market-feel → chain fetch_rss → analyze_sentiment.
-- For autonomous trading/protection/swap → chain fetch_rss → analyze_sentiment → execute_dex_swap.
+- For autonomous trading/protection/transfer → chain fetch_rss → analyze_sentiment → execute_onchain_action.
 - For whale watching/large transfers → use trigger_type "on_chain_event".
 - send_message should reference data from earlier steps using {{{{step_N_output}}}}.
 - Pick the most relevant RSS feed URL based on the user's topic.

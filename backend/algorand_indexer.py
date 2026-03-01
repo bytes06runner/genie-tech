@@ -3,10 +3,10 @@ algorand_indexer.py — Algorand On-Chain Event Listener & Transaction Builder
 ================================================================================
 Autonomous DeFi Agent components:
   • Poll Algorand Indexer for large transactions (whale alerts)
-  • Build unsigned payment/swap transactions for Mini App signing
+  • Build unsigned payment transactions for Mini App signing
   • Store pending unsigned transactions in SQLite for Telegram→WebApp handoff
 
-Dependencies: py-algorand-sdk, aiohttp, aiosqlite
+Uses the official py-algorand-sdk (IndexerClient + AlgodClient).
 """
 
 import asyncio
@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from typing import Optional, Callable
 
 import aiosqlite
+from algosdk.v2client import algod, indexer
+from algosdk import transaction, encoding
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,10 +27,14 @@ logger = logging.getLogger("algorand_indexer")
 
 DB_PATH = os.getenv("USERS_DB_PATH", "users.db")
 
-# ─── Algorand network config ─────────────────────────────────────
+# ─── Algorand network config (TestNet via Algonode) ──────────────
 ALGOD_URL = "https://testnet-api.algonode.cloud"
 INDEXER_URL = "https://testnet-idx.algonode.cloud"
 ALGO_DECIMALS = 6
+
+# ─── py-algorand-sdk clients ─────────────────────────────────────
+algod_client = algod.AlgodClient("", ALGOD_URL)
+indexer_client = indexer.IndexerClient("", INDEXER_URL)
 
 # ─── Notify callback (set by tg_bot.py) ──────────────────────────
 _tg_notify: Optional[Callable] = None
@@ -161,36 +167,35 @@ async def build_unsigned_payment(
     note: str = "X10V DeFi Agent",
 ) -> dict:
     """
-    Build an unsigned Algorand payment transaction.
+    Build an unsigned Algorand PaymentTxn using py-algorand-sdk.
     Returns a JSON-serializable dict the Mini App can reconstruct & sign.
     """
-    import aiohttp
+    loop = asyncio.get_event_loop()
 
-    # Fetch suggested params from algod
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{ALGOD_URL}/v2/transactions/params") as resp:
-            if resp.status != 200:
-                raise Exception(f"Failed to get tx params: HTTP {resp.status}")
-            params = await resp.json()
+    def _build():
+        sp = algod_client.suggested_params()
+        amount_micro = int(amount_algo * 1_000_000)
+        txn = transaction.PaymentTxn(
+            sender=sender,
+            sp=sp,
+            receiver=receiver,
+            amt=amount_micro,
+            note=note.encode("utf-8"),
+        )
+        return {
+            "type": "pay",
+            "from": sender,
+            "to": receiver,
+            "amount": amount_micro,
+            "fee": txn.fee,
+            "firstRound": txn.first_valid_round,
+            "lastRound": txn.last_valid_round,
+            "genesisID": txn.genesis_id,
+            "genesisHash": txn.genesis_hash,
+            "note": note,
+        }
 
-    amount_micro = int(amount_algo * 1_000_000)
-
-    # Return a serializable transaction descriptor
-    # The Mini App will use algosdk to reconstruct and sign
-    unsigned_txn = {
-        "type": "pay",
-        "from": sender,
-        "to": receiver,
-        "amount": amount_micro,
-        "fee": params.get("min-fee", 1000),
-        "firstRound": params.get("last-round", 0),
-        "lastRound": params.get("last-round", 0) + 1000,
-        "genesisID": params.get("genesis-id", "testnet-v1.0"),
-        "genesisHash": params.get("genesis-hash", ""),
-        "note": note,
-    }
-
-    return unsigned_txn
+    return await loop.run_in_executor(None, _build)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -226,68 +231,60 @@ async def poll_large_transactions(
     limit: int = 10,
 ) -> list:
     """
-    Poll Algorand Indexer for recent large transactions.
-    Returns list of whale transfer dicts.
+    Poll Algorand Indexer for recent large payment transactions using
+    the official py-algorand-sdk IndexerClient.search_transactions().
 
-    Uses the Indexer REST API directly (no SDK needed for simple queries).
+    10,000 ALGO = 10_000_000_000 microAlgos.
     """
-    import aiohttp
-
     min_micro = int(min_algo * 1_000_000)
     last_round = await _get_last_checked_round()
 
     # If we've never polled, start from a recent round
     if last_round == 0:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{ALGOD_URL}/v2/status") as resp:
-                if resp.status == 200:
-                    status = await resp.json()
-                    last_round = status.get("last-round", 0) - 50  # start 50 rounds back
-                else:
-                    logger.error("Failed to get algod status: %s", resp.status)
-                    return []
-
-    # Query Indexer for transactions above the threshold
-    params = {
-        "min-round": last_round + 1,
-        "currency-greater-than": min_micro,
-        "tx-type": "pay",
-        "limit": limit,
-    }
+        loop = asyncio.get_event_loop()
+        try:
+            status = await loop.run_in_executor(None, algod_client.status)
+            last_round = status.get("last-round", 0) - 50
+        except Exception as e:
+            logger.error("Failed to get algod status: %s", e)
+            return []
 
     whale_txns = []
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{INDEXER_URL}/v2/transactions"
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    logger.warning("Indexer query failed: HTTP %s", resp.status)
-                    return []
+        loop = asyncio.get_event_loop()
 
-                data = await resp.json()
-                txns = data.get("transactions", [])
-                current_round = data.get("current-round", last_round)
+        def _search():
+            return indexer_client.search_transactions(
+                min_round=last_round + 1,
+                min_amount=min_micro,
+                txn_type="pay",
+                limit=limit,
+            )
 
-                for txn in txns:
-                    pay_info = txn.get("payment-transaction", {})
-                    amount_algo = pay_info.get("amount", 0) / 1_000_000
-                    whale_txns.append({
-                        "tx_id": txn.get("id", ""),
-                        "sender": txn.get("sender", ""),
-                        "receiver": pay_info.get("receiver", ""),
-                        "amount_algo": amount_algo,
-                        "round": txn.get("confirmed-round", 0),
-                        "timestamp": txn.get("round-time", 0),
-                        "fee": txn.get("fee", 0) / 1_000_000,
-                    })
+        data = await loop.run_in_executor(None, _search)
+        txns = data.get("transactions", [])
+        current_round = data.get("current-round", last_round)
 
-                # Update cursor
-                if current_round > last_round:
-                    await _set_last_checked_round(current_round)
+        for txn in txns:
+            pay_info = txn.get("payment-transaction", {})
+            amount_algo_val = pay_info.get("amount", 0) / 1_000_000
+            whale_txns.append({
+                "tx_id": txn.get("id", ""),
+                "sender": txn.get("sender", ""),
+                "receiver": pay_info.get("receiver", ""),
+                "amount_algo": amount_algo_val,
+                "round": txn.get("confirmed-round", 0),
+                "timestamp": txn.get("round-time", 0),
+                "fee": txn.get("fee", 0) / 1_000_000,
+            })
 
-                if whale_txns:
-                    logger.info("🐋 Found %d whale transactions (>%s ALGO) from round %d",
-                                len(whale_txns), min_algo, last_round + 1)
+        # Update cursor
+        if current_round > last_round:
+            await _set_last_checked_round(current_round)
+
+        if whale_txns:
+            logger.info("🐋 Found %d whale transactions (>%s ALGO) from round %d",
+                        len(whale_txns), min_algo, last_round + 1)
 
     except Exception as e:
         logger.error("Indexer polling error: %s", e)
@@ -333,39 +330,46 @@ async def check_on_chain_events(trigger_config: dict) -> tuple[bool, dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  EXECUTE DEX SWAP — Build unsigned TX + trigger Telegram prompt
+#  EXECUTE ON-CHAIN ACTION — Build unsigned TX + trigger Telegram prompt
 # ═══════════════════════════════════════════════════════════════════
 
-# Dummy USDC-equivalent ASA on TestNet for demonstration
-# In production, this would be the real USDC ASA ID
-TESTNET_USDC_RECEIVER = "HZ57J3K46JIJXILONBBZOHX6BKPXEM2VVXNRFSUED6DKFD5ZD24PMJ3MVA"
+# Safe vault/escrow address for protective transfers (TestNet)
+SAFE_VAULT_ADDRESS = "HZ57J3K46JIJXILONBBZOHX6BKPXEM2VVXNRFSUED6DKFD5ZD24PMJ3MVA"
+
+# Hardcoded sender (user's Lute wallet on TestNet)
+DEFAULT_SENDER = "NEIQN3C2UPPWEX7PT67JQGZACSGDDFQR4AZCY6WFVEWQ43YJW3JQT6RIWU"
 
 
-async def execute_dex_swap_action(
+async def execute_onchain_action(
     tg_id: int,
     sender_address: str,
     amount_algo: float,
-    reason: str = "DeFi Agent autonomous swap",
+    reason: str = "DeFi Agent protective transfer",
     sentiment_data: Optional[dict] = None,
 ) -> dict:
     """
-    Build an unsigned ALGO→USDC swap transaction and trigger the
+    Build an unsigned protective ALGO transfer and trigger the
     Telegram inline keyboard prompt for user approval.
 
     Flow:
-      1. Build unsigned transaction
+      1. Build unsigned PaymentTxn on backend (using py-algorand-sdk)
       2. Store in pending_transactions DB
-      3. Send Telegram inline keyboard with "Approve Swap" button
+      3. Send Telegram inline keyboard with "Approve & Sign" button
       4. User clicks → opens Mini App → signs with Lute wallet
+      5. Mini App submits to TestNet and notifies backend
+
+    The bot NEVER signs the transaction — only the user's Lute wallet can.
     """
+    # Use the connected wallet or fall back to the hardcoded TestNet address
     if not sender_address:
-        return {"success": False, "output": "No wallet address connected. Use /connect_wallet first."}
+        sender_address = DEFAULT_SENDER
+        logger.info("Using default sender address: %s", sender_address[:12])
 
     try:
-        # Build the unsigned transaction
+        # Build the unsigned transaction via py-algorand-sdk
         unsigned_txn = await build_unsigned_payment(
             sender=sender_address,
-            receiver=TESTNET_USDC_RECEIVER,
+            receiver=SAFE_VAULT_ADDRESS,
             amount_algo=amount_algo,
             note=f"X10V DeFi Agent: {reason}",
         )
@@ -374,10 +378,10 @@ async def execute_dex_swap_action(
         pending = await create_pending_transaction(
             tg_id=tg_id,
             sender=sender_address,
-            receiver=TESTNET_USDC_RECEIVER,
+            receiver=SAFE_VAULT_ADDRESS,
             amount_algo=amount_algo,
             note=reason,
-            tx_type="dex_swap",
+            tx_type="protective_transfer",
         )
 
         # Craft the sentiment-aware message
@@ -405,8 +409,8 @@ async def execute_dex_swap_action(
         return {
             "success": True,
             "output": (
-                f"🔔 Swap prompt sent to user!\n"
-                f"Amount: {amount_algo} ALGO → USDC\n"
+                f"🔔 Protective transfer prompt sent!\n"
+                f"Amount: {amount_algo} ALGO → Safe Vault\n"
                 f"Reason: {reason}\n"
                 f"Pending TX ID: {pending['id']}\n"
                 f"Status: Awaiting user approval in Mini App"
@@ -416,5 +420,5 @@ async def execute_dex_swap_action(
         }
 
     except Exception as e:
-        logger.error("execute_dex_swap failed: %s", e)
-        return {"success": False, "output": f"Swap setup failed: {str(e)[:200]}"}
+        logger.error("execute_onchain_action failed: %s", e)
+        return {"success": False, "output": f"On-chain action failed: {str(e)[:200]}"}
