@@ -74,15 +74,124 @@ class ErrorBoundary extends Component {
   }
 }
 
-// ─── Connect Mode: paste address (always works) ─────────────────
+// ─── Connect Mode: Lute wallet integration + paste fallback ─────
 function ConnectMode() {
   const [address, setAddress] = useState('')
   const [status, setStatus] = useState(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [balance, setBalance] = useState(null)
+  const [luteAvailable, setLuteAvailable] = useState(false)
+  const [luteConnecting, setLuteConnecting] = useState(false)
   const sentRef = useRef(false)
 
   log('ConnectMode rendered')
+
+  // Detect Lute wallet extension on mount
+  useEffect(() => {
+    const checkLute = () => {
+      if (window.algorand) {
+        setLuteAvailable(true)
+        log('Lute wallet extension detected (window.algorand)')
+      } else {
+        log('Lute wallet not detected — paste fallback mode')
+      }
+    }
+    // Check immediately and also after a short delay (extension may inject late)
+    checkLute()
+    const timer = setTimeout(checkLute, 500)
+    return () => clearTimeout(timer)
+  }, [])
+
+  // ── Connect via Lute wallet extension ──
+  const handleLuteConnect = async () => {
+    if (!window.algorand) {
+      setErrorMsg('Lute Wallet extension not found. Please install it from lute.app')
+      return
+    }
+
+    setLuteConnecting(true)
+    setErrorMsg('')
+    setStatus('checking')
+
+    try {
+      log('Requesting Lute wallet connection via window.algorand.enable()...')
+
+      // Enable the wallet — this prompts the user in Lute to approve
+      const result = await window.algorand.enable({ genesisID: 'testnet-v1.0' })
+      log(`Lute enable result: ${JSON.stringify(result).slice(0, 300)}`)
+
+      const accounts = result?.accounts || result?.addresses || []
+      if (!accounts.length) {
+        // Try alternative: some Lute versions return differently
+        const altAccounts = result?.genesisAccounts || []
+        if (altAccounts.length) {
+          accounts.push(...altAccounts)
+        }
+      }
+
+      if (!accounts.length) {
+        setErrorMsg('No accounts found in Lute. Please create a TestNet account first.')
+        setStatus('error')
+        setLuteConnecting(false)
+        return
+      }
+
+      // Use the first account address
+      const walletAddress = typeof accounts[0] === 'string' ? accounts[0] : accounts[0]?.address
+      log(`Lute account: ${walletAddress}`)
+
+      if (!isValidAlgoAddress(walletAddress)) {
+        setErrorMsg(`Invalid address from Lute: ${walletAddress?.slice(0, 20)}...`)
+        setStatus('error')
+        setLuteConnecting(false)
+        return
+      }
+
+      setAddress(walletAddress)
+
+      // Verify on TestNet and get balance
+      if (algodClient) {
+        try {
+          const info = await algodClient.accountInformation(walletAddress).do()
+          const bal = (info['amount'] || 0) / 1e6
+          setBalance(bal)
+          log(`Lute wallet verified! Balance: ${bal} ALGO`)
+        } catch (e) {
+          log(`Balance fetch warning: ${e.message}`)
+          // Still proceed even if balance fetch fails
+        }
+      }
+
+      setStatus('success')
+
+      // Send to Telegram bot
+      if (tg && !sentRef.current) {
+        sentRef.current = true
+        setTimeout(() => {
+          const data = JSON.stringify({
+            action: 'wallet_connected',
+            address: walletAddress,
+            balance: balance || 0,
+            method: 'lute_extension',
+          })
+          log(`sendData: ${data}`)
+          tg.sendData(data)
+          tg.close()
+        }, 1500)
+      }
+
+    } catch (e) {
+      log(`Lute connect failed: ${e.message}`)
+      if (e.message?.includes('rejected') || e.message?.includes('denied') || e.code === 4001) {
+        setErrorMsg('Connection rejected by user. Please approve in Lute popup.')
+      } else {
+        setErrorMsg(`Lute connection failed: ${e.message}. Try pasting your address manually below.`)
+      }
+      setStatus('error')
+    }
+
+    setLuteConnecting(false)
+  }
 
   const handlePaste = async () => {
     try {
@@ -163,21 +272,47 @@ function ConnectMode() {
           <p style={{ fontSize: 13, color: '#8B949E', marginTop: 6 }}>Link your Algorand TestNet wallet</p>
         </div>
 
-        {/* Instructions */}
-        <div style={{ ...S.card, margin: '20px 0 16px', borderColor: '#634C1A' }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-            <span style={{ fontSize: 20 }}>💡</span>
-            <div style={{ fontSize: 12, color: '#D4A72C', lineHeight: 1.7 }}>
-              <strong>How to connect:</strong><br />
-              1. Open your <strong>Lute Wallet</strong> Chrome extension<br />
-              2. Switch to <strong>TestNet</strong> in Lute settings<br />
-              3. Copy your address from Lute<br />
-              4. Paste it below and tap <strong>Connect</strong>
+        {/* Lute Wallet Connect Button (primary method) */}
+        <div style={{ ...S.card, margin: '20px 0 16px', borderColor: luteAvailable ? '#238636' : '#30363D' }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
+            <span style={{ fontSize: 22 }}>�</span>
+            <div>
+              <h3 style={{ fontSize: 14, margin: 0, color: '#E6EDF3' }}>Connect with Lute Wallet</h3>
+              <p style={{ fontSize: 11, margin: '2px 0 0', color: luteAvailable ? '#3FB950' : '#8B949E' }}>
+                {luteAvailable ? '✅ Lute extension detected' : '⚠️ Lute extension not detected'}
+              </p>
             </div>
           </div>
+          <button
+            onClick={handleLuteConnect}
+            disabled={!luteAvailable || luteConnecting || status === 'checking'}
+            style={{
+              ...S.btn,
+              width: '100%', padding: '14px 0', fontSize: 15,
+              background: luteAvailable
+                ? 'linear-gradient(90deg,#238636,#2EA043)'
+                : '#21262D',
+              cursor: (!luteAvailable || luteConnecting) ? 'not-allowed' : 'pointer',
+              opacity: (!luteAvailable || luteConnecting) ? 0.5 : 1,
+            }}
+          >
+            {luteConnecting ? '⏳ Connecting to Lute…' : '🔗 Connect Lute Wallet'}
+          </button>
+          {!luteAvailable && (
+            <p style={{ fontSize: 11, color: '#8B949E', marginTop: 8, textAlign: 'center' }}>
+              Install <a href="https://lute.app" style={{ color: '#58A6FF' }} target="_blank" rel="noreferrer">Lute Wallet</a> Chrome extension first
+            </p>
+          )}
         </div>
 
-        {/* Input card */}
+        {/* Divider */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '4px 0' }}>
+          <div style={{ flex: 1, height: 1, background: '#21262D' }} />
+          <span style={{ fontSize: 11, color: '#484F58' }}>OR paste address manually</span>
+          <div style={{ flex: 1, height: 1, background: '#21262D' }} />
+        </div>
+
+        {/* Manual Input card (fallback) */}
         <div style={S.card}>
           <label style={{ fontSize: 12, color: '#8B949E', display: 'block', marginBottom: 6 }}>Algorand TestNet Address</label>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -263,7 +398,6 @@ ${(window.__bootLogs || []).join('\n')}`}
 }
 
 // ─── Sign Swap Mode: DeFi Agent unsigned transaction signing ─────
-const HARDCODED_SENDER = 'NEIQN3C2UPPWEX7PT67JQGZACSGDDFQR4AZCY6WFVEWQ43YJW3JQT6RIWU'
 
 function SignSwapMode() {
   const [status, setStatus] = useState('loading') // loading | ready | signing | success | error
@@ -314,8 +448,13 @@ function SignSwapMode() {
     try {
       log('Building transaction from pending TX data...')
 
-      // Use hardcoded sender address for Lute wallet on TestNet
-      const sender = txData.sender || HARDCODED_SENDER
+      // Use sender from pending TX (user's connected wallet)
+      const sender = txData.sender
+      if (!sender) {
+        setErrorMsg('No sender address in transaction. Please connect your wallet first via /connect_wallet.')
+        setStatus('error')
+        return
+      }
 
       // Reconstruct the PaymentTxn using algosdk
       const suggestedParams = await algodClient.getTransactionParams().do()
@@ -332,6 +471,17 @@ function SignSwapMode() {
       // Check for Lute wallet extension
       if (!window.algorand) {
         setErrorMsg('Lute Wallet extension not found. Please install it from lute.app')
+        setStatus('error')
+        return
+      }
+
+      // Ensure wallet is enabled/connected before signing
+      try {
+        await window.algorand.enable({ genesisID: 'testnet-v1.0' })
+        log('Lute wallet enabled for signing')
+      } catch (e) {
+        log(`Lute enable for signing failed: ${e.message}`)
+        setErrorMsg('Please approve the connection in your Lute wallet popup.')
         setStatus('error')
         return
       }
@@ -448,7 +598,7 @@ function SignSwapMode() {
             <h3 style={{ fontSize: 14, margin: '0 0 12px', color: '#FF7B72' }}>📋 Transaction Details</h3>
             <div style={{ fontSize: 12, color: '#E6EDF3', lineHeight: 2 }}>
               <p>� <strong>Transfer:</strong> {txData.amount_algo} ALGO → Safe Vault</p>
-              <p>📤 <strong>From:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{(txData.sender || HARDCODED_SENDER)?.slice(0, 20)}…</span></p>
+              <p>📤 <strong>From:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{txData.sender?.slice(0, 20)}…</span></p>
               <p>📥 <strong>To:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{txData.receiver?.slice(0, 20)}…</span></p>
               <p>📝 <strong>Reason:</strong> {txData.note || 'DeFi Agent Protective Transfer'}</p>
               <p>🆔 <strong>ID:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{ptxId}</span></p>

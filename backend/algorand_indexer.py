@@ -405,7 +405,7 @@ async def check_on_chain_events(trigger_config: dict) -> tuple[bool, dict]:
 # Safe vault/escrow address for protective transfers (TestNet)
 SAFE_VAULT_ADDRESS = "HZ57J3K46JIJXILONBBZOHX6BKPXEM2VVXNRFSUED6DKFD5ZD24PMJ3MVA"
 
-# Hardcoded sender (user's Lute wallet on TestNet)
+# Fallback sender for demo purposes only (when user has no wallet connected)
 DEFAULT_SENDER = "NEIQN3C2UPPWEX7PT67JQGZACSGDDFQR4AZCY6WFVEWQ43YJW3JQT6RIWU"
 
 
@@ -429,10 +429,16 @@ async def execute_onchain_action(
 
     The bot NEVER signs the transaction — only the user's Lute wallet can.
     """
-    # Use the connected wallet or fall back to the hardcoded TestNet address
+    # Use the connected wallet — require it for real transactions
     if not sender_address:
-        sender_address = DEFAULT_SENDER
-        logger.info("Using default sender address: %s", sender_address[:12])
+        logger.warning("No wallet connected for user %d — cannot execute on-chain action", tg_id)
+        return {
+            "success": False,
+            "output": (
+                "⚠️ No wallet connected! Please use /connect_wallet to link "
+                "your Lute wallet before executing on-chain actions."
+            ),
+        }
 
     try:
         # Build the unsigned transaction via py-algorand-sdk
