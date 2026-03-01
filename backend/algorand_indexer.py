@@ -53,6 +53,75 @@ def set_swap_prompt_callback(fn):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  ON-CHAIN BALANCE LOOKUP
+# ═══════════════════════════════════════════════════════════════════
+
+async def get_algo_balance(address: str) -> Optional[dict]:
+    """
+    Fetch real on-chain ALGO balance for an address via algod.
+    Returns dict with balance info or None on error.
+    """
+    if not address:
+        return None
+    loop = asyncio.get_event_loop()
+
+    def _fetch():
+        try:
+            info = algod_client.account_info(address)
+            amount_micro = info.get("amount", 0)
+            min_balance_micro = info.get("min-balance", 100_000)
+            return {
+                "address": address,
+                "balance_micro": amount_micro,
+                "balance_algo": amount_micro / 1_000_000,
+                "min_balance_algo": min_balance_micro / 1_000_000,
+                "available_algo": max(0, (amount_micro - min_balance_micro)) / 1_000_000,
+                "total_assets": info.get("total-assets-opted-in", 0),
+                "total_apps": info.get("total-apps-opted-in", 0),
+                "status": info.get("status", "Offline"),
+            }
+        except Exception as e:
+            logger.error("Failed to fetch balance for %s: %s", address[:12], e)
+            return None
+
+    return await loop.run_in_executor(None, _fetch)
+
+
+async def get_account_transactions(address: str, limit: int = 5) -> list:
+    """
+    Fetch recent transactions for an address from the Indexer.
+    Returns list of simplified transaction dicts.
+    """
+    if not address:
+        return []
+    loop = asyncio.get_event_loop()
+
+    def _fetch():
+        try:
+            data = indexer_client.search_transactions_by_address(
+                address, limit=limit, txn_type="pay"
+            )
+            txns = data.get("transactions", [])
+            result = []
+            for txn in txns:
+                pay = txn.get("payment-transaction", {})
+                result.append({
+                    "tx_id": txn.get("id", "")[:12] + "…",
+                    "sender": txn.get("sender", ""),
+                    "receiver": pay.get("receiver", ""),
+                    "amount_algo": pay.get("amount", 0) / 1_000_000,
+                    "round": txn.get("confirmed-round", 0),
+                    "type": "sent" if txn.get("sender") == address else "received",
+                })
+            return result
+        except Exception as e:
+            logger.error("Failed to fetch txns for %s: %s", address[:12], e)
+            return []
+
+    return await loop.run_in_executor(None, _fetch)
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  DATABASE — Pending unsigned transactions for Mini App handoff
 # ═══════════════════════════════════════════════════════════════════
 

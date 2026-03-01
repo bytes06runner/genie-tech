@@ -97,6 +97,8 @@ from algorand_indexer import (
     get_pending_transaction,
     mark_transaction_signed,
     get_user_pending_transactions,
+    get_algo_balance,
+    get_account_transactions,
     DEFAULT_SENDER,
 )
 
@@ -264,7 +266,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🚀 *Welcome to X10V, {name}!*\n\n"
             f"Your AI-powered automation headquarters.\n\n"
-            f"💰 *$1,000* demo balance loaded\n"
+            f"💰 *$1,000* paper trading balance loaded\n"
             f"🧠 3-LLM Swarm (Gemini + Groq) ready\n"
             f"📊 Real-time stock data engine online\n"
             f"⚡ n8n-style workflow automation enabled\n"
@@ -278,10 +280,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
         )
     else:
+        # Returning user — show real on-chain balance if wallet connected
+        wallet_line = ""
+        if user.get("algo_address"):
+            chain_info = await get_algo_balance(user["algo_address"])
+            if chain_info:
+                wallet_line = (
+                    f"� Wallet: `{user['algo_address'][:16]}…`\n"
+                    f"💎 ALGO: `{chain_info['balance_algo']:.6f}`\n"
+                )
+            else:
+                wallet_line = f"🔗 Wallet: `{user['algo_address'][:16]}…` _(balance unavailable)_\n"
+        else:
+            wallet_line = "🔗 Wallet: Not connected — use `/connect_wallet`\n"
+
         await update.message.reply_text(
             f"👋 *Welcome back, {name}!*\n\n"
-            f"💰 Balance: `${user.get('balance', 0):.2f}`\n"
-            f"🔗 Wallet: `{user.get('algo_address', 'Not connected')}`\n\n"
+            f"{wallet_line}"
+            f"📝 Paper Balance: `${user.get('balance', 0):.2f}`\n\n"
             f"Type anything to chat with the AI Swarm, or use `/help` for commands.",
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -1028,9 +1044,22 @@ async def handle_web_app_data(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await link_wallet(tg_id, address, "lute-external-wallet")
+
+    # Fetch real on-chain balance to confirm connection
+    chain_info = await get_algo_balance(address)
+    if chain_info:
+        balance_text = (
+            f"💎 *Balance:* `{chain_info['balance_algo']:.6f} ALGO`\n"
+            f"💧 *Available:* `{chain_info['available_algo']:.6f} ALGO`\n"
+        )
+    else:
+        balance_text = "⚠️ _Could not fetch on-chain balance — check address_\n"
+
     await update.message.reply_text(
         f"✅ *Wallet Connected!*\n\n📬 `{address}`\n\n"
-        f"💧 [Fund on TestNet](https://bank.testnet.algorand.network/)",
+        f"{balance_text}\n"
+        f"💧 [Fund on TestNet](https://bank.testnet.algorand.network/)\n"
+        f"📊 Use `/portfolio` to see full details",
         parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
     )
 
@@ -1148,7 +1177,7 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Use `/start` first.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    balance = user.get("balance", 0)
+    paper_balance = user.get("balance", 0)
     wallet = user.get("algo_address")
     positions = await get_open_positions(tg_id)
     monitors = get_user_monitors(tg_id)
@@ -1158,8 +1187,35 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     schedules = await get_user_scheduled_messages(tg_id)
 
     text = f"💼 *X10V Portfolio*\n\n"
-    text += f"💰 *Balance:* `${balance:.2f}`\n"
-    text += f"🔗 *Wallet:* `{wallet[:16]}…`\n\n" if wallet else "🔗 *Wallet:* Not connected\n\n"
+
+    # ── On-chain ALGO balance (real) ──
+    if wallet:
+        chain_info = await get_algo_balance(wallet)
+        if chain_info:
+            text += f"🔗 *Wallet:* `{wallet[:16]}…`\n"
+            text += f"💎 *ALGO Balance:* `{chain_info['balance_algo']:.6f} ALGO`\n"
+            text += f"💧 *Available:* `{chain_info['available_algo']:.6f} ALGO`\n"
+            text += f"� *Min Balance:* `{chain_info['min_balance_algo']:.6f} ALGO`\n"
+            if chain_info['total_assets'] > 0:
+                text += f"🪙 *ASAs:* {chain_info['total_assets']} opted-in\n"
+            text += f"🌐 *Status:* {chain_info['status']}\n\n"
+
+            # Recent transactions
+            recent_txns = await get_account_transactions(wallet, limit=3)
+            if recent_txns:
+                text += "📜 *Recent Transactions:*\n"
+                for tx in recent_txns:
+                    arrow = "📤" if tx["type"] == "sent" else "📥"
+                    text += f"  {arrow} `{tx['amount_algo']:.4f}` ALGO — `{tx['tx_id']}`\n"
+                text += "\n"
+        else:
+            text += f"🔗 *Wallet:* `{wallet[:16]}…`\n"
+            text += f"⚠️ _Could not fetch on-chain balance_\n\n"
+    else:
+        text += "🔗 *Wallet:* Not connected — use `/connect_wallet`\n\n"
+
+    # ── Paper trading balance ──
+    text += f"📝 *Paper Trading Balance:* `${paper_balance:.2f}`\n\n"
 
     # Positions
     if positions:
@@ -1644,7 +1700,7 @@ async def _handle_stock_query(update: Update, text: str):
 async def post_init(application):
     """Set bot commands in the Telegram UI menu."""
     commands = [
-        BotCommand("start", "Create profile ($1,000 demo)"),
+        BotCommand("start", "Create profile & connect wallet"),
         BotCommand("help", "Show all 30+ commands"),
         BotCommand("stock", "Real-time stock/crypto data"),
         BotCommand("news", "Web-scraped latest news"),
