@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -438,7 +438,37 @@ async def get_pending_signals():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "X10V Backend", "version": "2.0.0"}
+    return {"status": "ok", "service": "X10V Backend", "version": "3.0.0-defi"}
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  PENDING TRANSACTION API — Mini App ↔ Backend handoff
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/api/pending_tx/{ptx_id}")
+async def get_pending_tx(ptx_id: str):
+    """
+    Fetch a pending unsigned transaction for the Mini App to sign.
+    Called by the React webapp when mode=sign_swap.
+    """
+    from algorand_indexer import get_pending_transaction
+    tx = await get_pending_transaction(ptx_id)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Pending transaction not found or already processed")
+    return tx
+
+
+@app.post("/api/pending_tx/{ptx_id}/signed")
+async def mark_tx_signed(ptx_id: str, body: dict):
+    """
+    Mark a pending transaction as signed after the Mini App submits it.
+    """
+    from algorand_indexer import mark_transaction_signed
+    algo_tx_id = body.get("algo_tx_id", "")
+    if not algo_tx_id:
+        raise HTTPException(status_code=400, detail="algo_tx_id is required")
+    await mark_transaction_signed(ptx_id, algo_tx_id)
+    return {"status": "ok", "ptx_id": ptx_id, "algo_tx_id": algo_tx_id}
 
 
 @app.websocket("/ws")

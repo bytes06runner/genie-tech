@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -88,6 +89,14 @@ from automation_engine import (
     set_automation_notify,
     _fetch_stock_data,
     execute_action_node,
+)
+from algorand_indexer import (
+    init_indexer_db,
+    set_indexer_notify,
+    set_swap_prompt_callback,
+    get_pending_transaction,
+    mark_transaction_signed,
+    get_user_pending_transactions,
 )
 
 load_dotenv()
@@ -153,6 +162,161 @@ async def tg_notify(tg_id: int, text: str):
                 )
             except Exception as e:
                 logger.error("tg_notify failed for %d: %s", tg_id, e)
+
+
+async def tg_send_swap_prompt(
+    tg_id: int,
+    pending_tx_id: str,
+    amount_algo: float,
+    reason: str = "",
+    sentiment_label: str = "⚠️ Market Signal",
+):
+    """
+    Send an inline keyboard to the user with Approve/Reject buttons
+    for a pending DeFi swap transaction.
+    """
+    global _bot_app
+    if not (_bot_app and _bot_app.bot):
+        logger.error("Cannot send swap prompt: bot not initialized")
+        return
+
+    # Mini App URL for signing the swap
+    sign_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={pending_tx_id}&_t={int(_time.time())}"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text=f"✅ Approve & Sign ({amount_algo} ALGO)",
+            web_app=WebAppInfo(url=sign_url),
+        )],
+        [InlineKeyboardButton(
+            text="❌ Reject Swap",
+            callback_data=f"reject_swap:{pending_tx_id}",
+        )],
+    ])
+
+    text = (
+        f"🚨 *DeFi Agent — Swap Proposal*\n\n"
+        f"📊 {sentiment_label}\n\n"
+        f"💱 *{amount_algo} ALGO → USDC*\n"
+        f"📝 _{reason}_\n\n"
+        f"🆔 `{pending_tx_id}`\n\n"
+        f"Tap *Approve & Sign* to open your Lute wallet and sign the transaction, "
+        f"or *Reject* to cancel."
+    )
+
+    try:
+        await _bot_app.bot.send_message(
+            chat_id=tg_id,
+            text=_sanitize_markdown(text),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+        logger.info("📤 Swap prompt sent to user %d for TX %s", tg_id, pending_tx_id)
+    except Exception as e:
+        logger.error("Failed to send swap prompt to %d: %s", tg_id, e)
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses (e.g., Reject Swap)."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+
+    if data.startswith("reject_swap:"):
+        ptx_id = data.split(":", 1)[1]
+        # Mark as rejected in DB
+        try:
+            import aiosqlite
+            async with aiosqlite.connect(
+                os.getenv("USERS_DB_PATH", "users.db")
+            ) as db:
+                await db.execute(
+                    "UPDATE pending_transactions SET status = 'rejected' WHERE id = ?",
+                    (ptx_id,),
+                )
+                await db.commit()
+        except Exception as e:
+            logger.error("Failed to reject swap %s: %s", ptx_id, e)
+
+        await query.edit_message_text(
+            f"❌ *Swap Rejected*\n\nTransaction `{ptx_id}` has been cancelled.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        logger.info("❌ User rejected swap %s", ptx_id)
+
+    else:
+        logger.warning("Unknown callback data: %s", data[:60])
+
+
+async def tg_send_swap_prompt(
+    tg_id: int,
+    pending_tx_id: str,
+    amount_algo: float,
+    reason: str,
+    sentiment_label: str,
+):
+    """
+    Send an Inline Keyboard Button to Telegram with a swap approval prompt.
+    When clicked, opens the Mini App with the unsigned transaction details.
+    """
+    global _bot_app
+    if not _bot_app or not _bot_app.bot:
+        logger.error("Cannot send swap prompt — bot not initialized")
+        return
+
+    swap_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={pending_tx_id}&_t={int(_time.time())}"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            text=f"🔐 Approve & Sign Swap ({amount_algo} ALGO)",
+            web_app=WebAppInfo(url=swap_url),
+        )],
+        [InlineKeyboardButton(
+            text="❌ Reject Swap",
+            callback_data=f"reject_swap:{pending_tx_id}",
+        )],
+    ])
+
+    text = (
+        f"🚨 *DeFi Agent — Swap Proposal*\n\n"
+        f"*{sentiment_label}*\n\n"
+        f"📊 *Reason:* {_sanitize_markdown(reason)}\n"
+        f"💰 *Amount:* `{amount_algo} ALGO` → USDC\n"
+        f"🆔 *TX ID:* `{pending_tx_id}`\n\n"
+        f"Tap below to review & sign in your Lute Wallet, "
+        f"or reject to cancel."
+    )
+
+    try:
+        await _bot_app.bot.send_message(
+            chat_id=tg_id,
+            text=text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+        logger.info("✅ Swap prompt sent to user %d — PTX: %s", tg_id, pending_tx_id)
+    except Exception as e:
+        logger.error("Failed to send swap prompt: %s", e)
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard callback queries (e.g., reject swap)."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+
+    if data.startswith("reject_swap:"):
+        ptx_id = data.split(":", 1)[1]
+        await query.edit_message_text(
+            f"❌ *Swap Rejected*\n\n"
+            f"Transaction `{ptx_id}` was cancelled.\n"
+            f"No funds were moved.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        logger.info("❌ User %d rejected swap %s", update.effective_user.id, ptx_id)
+    else:
+        logger.warning("Unknown callback query: %s", data)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -981,6 +1145,71 @@ async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  DeFi AGENT COMMANDS — Whale Alerts, Pending Swaps
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_whale_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually check for recent whale transactions on Algorand TestNet."""
+    from algorand_indexer import poll_large_transactions
+
+    min_algo = 10_000.0
+    if context.args:
+        try:
+            min_algo = float(context.args[0])
+        except ValueError:
+            pass
+
+    await update.message.reply_text(
+        f"🐋 _Scanning Algorand TestNet for transfers > {min_algo:,.0f} ALGO…_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    try:
+        whales = await poll_large_transactions(min_algo=min_algo, limit=10)
+        if not whales:
+            await update.message.reply_text(
+                f"No whale transactions found (>{min_algo:,.0f} ALGO) in recent blocks.",
+            )
+            return
+
+        text = f"🐋 *Whale Alert — {len(whales)} Large Transfers*\n\n"
+        for i, w in enumerate(whales[:5], 1):
+            text += (
+                f"{i}. `{w['amount_algo']:,.2f}` ALGO\n"
+                f"   From: `{w['sender'][:12]}…`\n"
+                f"   To: `{w['receiver'][:12]}…`\n"
+                f"   Round: `{w['round']}` | Fee: `{w['fee']} ALGO`\n\n"
+            )
+
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Whale scan failed: {str(e)[:200]}")
+
+
+async def cmd_pending_swaps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List pending unsigned swap transactions waiting for user approval."""
+    tg_id = update.effective_user.id
+    pending = await get_user_pending_transactions(tg_id)
+
+    if not pending:
+        await update.message.reply_text("✅ No pending swap transactions.")
+        return
+
+    text = f"🔔 *Pending Swaps ({len(pending)}):*\n\n"
+    for p in pending[:5]:
+        swap_url = f"{WEBAPP_URL}?mode=sign_swap&ptx={p['id']}&_t={int(_time.time())}"
+        text += (
+            f"🆔 `{p['id']}`\n"
+            f"💰 {p['amount_algo']} ALGO → USDC\n"
+            f"📝 {p['note'][:60]}\n"
+            f"🕐 {p['created_at'][:16]}\n\n"
+        )
+
+    text += "Use the inline buttons to approve or reject."
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
 async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
@@ -1331,6 +1560,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "disconnect": cmd_disconnect,
             "reset_wallet": cmd_reset_wallet,
             "transact": cmd_transact,
+            "whale_alert": cmd_whale_alert,
+            "pending_swaps": cmd_pending_swaps,
             "start": cmd_start,
             "help": cmd_help,
         }
@@ -1512,6 +1743,8 @@ async def post_init(application):
         BotCommand("transact", "Algorand Web3 Bridge"),
         BotCommand("disconnect", "Remove wallet"),
         BotCommand("reset_wallet", "Force-clear wallet"),
+        BotCommand("whale_alert", "Scan for whale transactions"),
+        BotCommand("pending_swaps", "View pending DeFi swaps"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("✅ Bot commands registered (30 commands)")
@@ -1528,12 +1761,15 @@ def main():
     import asyncio as _aio
     loop = _aio.new_event_loop()
     loop.run_until_complete(init_automation_db())
+    loop.run_until_complete(init_indexer_db())
     loop.close()
 
     # Wire up notify callbacks
     set_tg_notify(tg_notify)
     set_rule_notify(tg_notify)
     set_automation_notify(tg_notify)
+    set_indexer_notify(tg_notify)
+    set_swap_prompt_callback(tg_send_swap_prompt)
 
     # Start market monitor scheduler
     start_monitor_scheduler()
@@ -1595,20 +1831,23 @@ def main():
     app.add_handler(CommandHandler("mock_trade", cmd_mock_trade))
     app.add_handler(CommandHandler("trade_history", cmd_trade_history))
 
-    # Wallet
+    # Wallet & DeFi
     app.add_handler(CommandHandler("connect_wallet", cmd_connect_wallet))
     app.add_handler(CommandHandler("disconnect", cmd_disconnect))
     app.add_handler(CommandHandler("reset_wallet", cmd_reset_wallet))
     app.add_handler(CommandHandler("transact", cmd_transact))
+    app.add_handler(CommandHandler("whale_alert", cmd_whale_alert))
+    app.add_handler(CommandHandler("pending_swaps", cmd_pending_swaps))
 
-    # Free-text & Web App Data
+    # Free-text, Callback Queries & Web App Data
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("=" * 60)
-    logger.info("  X10V Ultimate Automation Bot — 30 commands")
-    logger.info("  3-LLM Swarm | Real-Time Stocks | n8n Workflows")
-    logger.info("  Scheduled Messages | Web Scraping | YouTube Research")
+    logger.info("  X10V Autonomous DeFi Agent — 30+ commands")
+    logger.info("  3-LLM Swarm | On-Chain Events | Sentiment Analysis")
+    logger.info("  DEX Swaps | n8n Workflows | YouTube Research")
     logger.info("=" * 60)
     app.run_polling(drop_pending_updates=True)
 

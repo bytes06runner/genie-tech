@@ -38,6 +38,12 @@ function getAppMode() {
   } catch { return 'connect' }
 }
 
+function getUrlParam(key) {
+  try {
+    return new URLSearchParams(window.location.search).get(key) || ''
+  } catch { return '' }
+}
+
 function isValidAlgoAddress(addr) {
   if (!addr || addr.length !== 58) return false
   try { algosdk.decodeAddress(addr); return true } catch { return false }
@@ -256,6 +262,247 @@ ${(window.__bootLogs || []).join('\n')}`}
   )
 }
 
+// ─── Sign Swap Mode: DeFi Agent unsigned transaction signing ─────
+function SignSwapMode() {
+  const [status, setStatus] = useState('loading') // loading | ready | signing | success | error
+  const [txData, setTxData] = useState(null)
+  const [address, setAddress] = useState('')
+  const [errorMsg, setErrorMsg] = useState('')
+  const [txId, setTxId] = useState('')
+  const sentRef = useRef(false)
+
+  const ptxId = getUrlParam('ptx')
+
+  log(`SignSwapMode rendered — ptx=${ptxId}`)
+
+  // Fetch pending transaction from backend
+  useEffect(() => {
+    if (!ptxId) {
+      setErrorMsg('No pending transaction ID provided.')
+      setStatus('error')
+      return
+    }
+
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://x10v-backend.onrender.com'
+
+    fetch(`${backendUrl}/api/pending_tx/${ptxId}`)
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
+      .then(data => {
+        log(`Fetched pending TX: ${JSON.stringify(data).slice(0, 200)}`)
+        setTxData(data)
+        setAddress(data.sender || '')
+        setStatus('ready')
+      })
+      .catch(err => {
+        log(`Failed to fetch pending TX: ${err.message}`)
+        setErrorMsg(`Could not load transaction: ${err.message}`)
+        setStatus('error')
+      })
+  }, [ptxId])
+
+  const handleSign = async () => {
+    if (!txData || !algodClient) return
+
+    setStatus('signing')
+    setErrorMsg('')
+
+    try {
+      log('Building transaction from pending TX data...')
+
+      // Reconstruct the transaction using algosdk
+      const suggestedParams = await algodClient.getTransactionParams().do()
+      const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+        from: txData.sender,
+        to: txData.receiver,
+        amount: Math.floor(txData.amount_algo * 1e6),
+        suggestedParams,
+        note: new Uint8Array(Buffer.from(txData.note || 'X10V DeFi Agent Swap')),
+      })
+
+      log('Transaction built. Requesting Lute wallet signature...')
+
+      // Check for Lute wallet extension
+      if (!window.algorand) {
+        setErrorMsg('Lute Wallet extension not found. Please install it from lute.app')
+        setStatus('error')
+        return
+      }
+
+      // Request signature from Lute
+      const encodedTxn = txn.toByte()
+      const b64Txn = btoa(String.fromCharCode(...encodedTxn))
+
+      const result = await window.algorand.signTxns([{
+        txn: b64Txn,
+      }])
+
+      if (!result || !result[0]) {
+        setErrorMsg('Wallet rejected the transaction.')
+        setStatus('error')
+        return
+      }
+
+      log('Transaction signed! Submitting to network...')
+
+      // Decode signed transaction and submit
+      const signedBytes = new Uint8Array(atob(result[0]).split('').map(c => c.charCodeAt(0)))
+      const sendResult = await algodClient.sendRawTransaction(signedBytes).do()
+      const confirmedTxId = sendResult.txId || sendResult.txid
+
+      log(`Transaction submitted! TX ID: ${confirmedTxId}`)
+
+      // Wait for confirmation
+      await algosdk.waitForConfirmation(algodClient, confirmedTxId, 4)
+
+      setTxId(confirmedTxId)
+      setStatus('success')
+
+      // Notify backend that the TX was signed
+      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://x10v-backend.onrender.com'
+      fetch(`${backendUrl}/api/pending_tx/${ptxId}/signed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ algo_tx_id: confirmedTxId }),
+      }).catch(e => log(`Backend notify failed: ${e.message}`))
+
+      // Send result back to Telegram
+      if (tg && !sentRef.current) {
+        sentRef.current = true
+        setTimeout(() => {
+          const data = JSON.stringify({
+            action: 'swap_signed',
+            ptx_id: ptxId,
+            tx_id: confirmedTxId,
+            amount_algo: txData.amount_algo,
+          })
+          log(`sendData: ${data}`)
+          tg.sendData(data)
+          tg.close()
+        }, 2000)
+      }
+
+    } catch (e) {
+      log(`Sign/submit failed: ${e.message}`)
+      setErrorMsg(`Transaction failed: ${e.message}`)
+      setStatus('error')
+    }
+  }
+
+  if (status === 'loading') {
+    return (
+      <div style={S.page}>
+        <div style={S.card}>
+          <p style={{ fontSize: 40, textAlign: 'center' }}>⏳</p>
+          <p style={{ fontSize: 14, color: '#8B949E', textAlign: 'center', marginTop: 8 }}>Loading transaction…</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (status === 'success') {
+    return (
+      <div style={S.page}>
+        <div style={{ ...S.card, borderColor: '#238636', maxWidth: 420, width: '100%' }}>
+          <p style={{ fontSize: 48, textAlign: 'center' }}>✅</p>
+          <h2 style={{ color: '#3FB950', margin: '8px 0', textAlign: 'center' }}>Swap Executed!</h2>
+          <p style={{ fontSize: 13, color: '#8B949E', textAlign: 'center' }}>Transaction confirmed on Algorand TestNet</p>
+          <div style={S.mono}>
+            <p style={{ margin: '4px 0' }}>💱 {txData?.amount_algo} ALGO → USDC</p>
+            <p style={{ margin: '4px 0', fontSize: 10, wordBreak: 'break-all' }}>TX: {txId}</p>
+          </div>
+          <a
+            href={`https://testnet.explorer.perawallet.app/tx/${txId}`}
+            target="_blank"
+            rel="noreferrer"
+            style={{ ...S.btn, display: 'block', textAlign: 'center', marginTop: 12, padding: '10px 0', textDecoration: 'none' }}
+          >
+            🔍 View on Explorer
+          </a>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={S.page}>
+      <div style={{ maxWidth: 420, width: '100%' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', padding: '12px 0 20px', borderBottom: '1px solid #21262D' }}>
+          <h1 style={{ fontSize: 20, fontWeight: 800, background: 'linear-gradient(90deg,#F85149,#FF7B72)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', margin: 0 }}>
+            🚨 DeFi Agent — Swap Approval
+          </h1>
+          <p style={{ fontSize: 12, color: '#8B949E', marginTop: 6 }}>Review and sign the autonomous swap</p>
+        </div>
+
+        {/* Transaction details card */}
+        {txData && (
+          <div style={{ ...S.card, margin: '20px 0 16px', borderColor: '#F85149' }}>
+            <h3 style={{ fontSize: 14, margin: '0 0 12px', color: '#FF7B72' }}>📋 Transaction Details</h3>
+            <div style={{ fontSize: 12, color: '#E6EDF3', lineHeight: 2 }}>
+              <p>💱 <strong>Swap:</strong> {txData.amount_algo} ALGO → USDC</p>
+              <p>📤 <strong>From:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{txData.sender?.slice(0, 20)}…</span></p>
+              <p>📥 <strong>To:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{txData.receiver?.slice(0, 20)}…</span></p>
+              <p>📝 <strong>Reason:</strong> {txData.note || 'DeFi Agent Swap'}</p>
+              <p>🆔 <strong>ID:</strong> <span style={{ fontFamily: 'monospace', fontSize: 10 }}>{ptxId}</span></p>
+            </div>
+          </div>
+        )}
+
+        {/* Error display */}
+        {errorMsg && (
+          <div style={{ marginBottom: 16, background: 'rgba(248,81,73,0.1)', border: '1px solid #F85149', borderRadius: 8, padding: 10 }}>
+            <p style={{ fontSize: 12, color: '#F85149', margin: 0 }}>{errorMsg}</p>
+          </div>
+        )}
+
+        {/* Action buttons */}
+        {status === 'ready' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <button
+              onClick={handleSign}
+              style={{
+                ...S.btn,
+                width: '100%', padding: '14px 0', fontSize: 16,
+                background: 'linear-gradient(90deg,#F85149,#DA3633)',
+              }}
+            >
+              🔐 Sign & Execute Swap
+            </button>
+            <button
+              onClick={() => { if (tg) tg.close(); else window.close() }}
+              style={{
+                ...S.btn, width: '100%', padding: '12px 0', fontSize: 14,
+                background: '#21262D', color: '#8B949E',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
+        {status === 'signing' && (
+          <div style={{ textAlign: 'center', padding: 20 }}>
+            <p style={{ fontSize: 28 }}>🔐</p>
+            <p style={{ fontSize: 14, color: '#8B949E', marginTop: 8 }}>Waiting for Lute wallet…</p>
+            <p style={{ fontSize: 12, color: '#484F58', marginTop: 4 }}>Check your Lute extension popup</p>
+          </div>
+        )}
+
+        {/* Network badge */}
+        <div style={{ textAlign: 'center', marginTop: 20 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#8B949E', background: '#161B22', padding: '4px 12px', borderRadius: 20, border: '1px solid #21262D' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#D29922' }} />
+            Algorand TestNet — Autonomous DeFi Agent
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Root App ────────────────────────────────────────────────────
 export default function App() {
   const [ready, setReady] = useState(false)
@@ -279,9 +526,19 @@ export default function App() {
     )
   }
 
+  const renderMode = () => {
+    switch (mode) {
+      case 'sign_swap':
+        return <SignSwapMode />
+      case 'connect':
+      default:
+        return <ConnectMode />
+    }
+  }
+
   return (
     <ErrorBoundary>
-      <ConnectMode />
+      {renderMode()}
     </ErrorBoundary>
   )
 }

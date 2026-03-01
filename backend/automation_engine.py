@@ -4,9 +4,11 @@ automation_engine.py — n8n-Style Workflow Automation Engine
 A full-featured workflow automation engine inspired by n8n, designed for
 Telegram-native execution. Supports:
 
-  • Trigger Nodes  — cron, price_threshold, keyword_match, webhook, time_once
+  • Trigger Nodes  — cron, price_threshold, keyword_match, webhook, time_once,
+                     on_chain_event (Algorand Indexer whale alerts)
   • Action Nodes   — send_message, ai_analyze, web_scrape, fetch_rss, stock_lookup,
-                     youtube_research, execute_trade, api_call
+                     youtube_research, execute_trade, api_call, analyze_sentiment,
+                     execute_dex_swap
   • Condition Nodes — if/else branching based on variables
   • Workflow DAG    — multi-step pipelines with variable passing
 
@@ -382,6 +384,119 @@ async def execute_action_node(action: dict, variables: dict) -> dict:
             await asyncio.sleep(min(seconds, 300))  # Max 5 min delay
             result = {"success": True, "output": f"Waited {seconds}s"}
 
+        elif action_type == "analyze_sentiment":
+            # ── NEW: LLM-powered sentiment analysis of text/RSS output ──
+            from groq import Groq as _Groq
+            input_text = _interpolate(config.get("text", ""), variables)
+            # If no explicit text, use previous step output
+            if not input_text.strip():
+                for k in sorted(variables.keys(), reverse=True):
+                    if k.startswith("step_") and k.endswith("_output") and variables[k]:
+                        input_text = str(variables[k])
+                        break
+
+            if not input_text.strip():
+                result = {"success": False, "output": "No text to analyze for sentiment."}
+            else:
+                groq_key = os.getenv("GROQ_API_KEY")
+                _groq = _Groq(api_key=groq_key)
+
+                sentiment_prompt = (
+                    "You are a financial sentiment analyzer. Analyze the following text "
+                    "and return ONLY a JSON object with these fields:\n"
+                    '{"sentiment": "bullish" | "bearish" | "neutral", '
+                    '"score": 0-100 (0=extreme bearish, 50=neutral, 100=extreme bullish), '
+                    '"confidence": 0.0-1.0, '
+                    '"key_signals": ["signal1", "signal2"], '
+                    '"summary": "one-sentence summary"}\n\n'
+                    f"TEXT TO ANALYZE:\n{input_text[:4000]}"
+                )
+
+                def _call_sentiment():
+                    resp = _groq.chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=[{"role": "user", "content": sentiment_prompt}],
+                        temperature=0.1,
+                        max_tokens=300,
+                    )
+                    return resp.choices[0].message.content
+
+                raw_sentiment = await asyncio.get_event_loop().run_in_executor(None, _call_sentiment)
+
+                try:
+                    sentiment_data = _safe_parse_json(raw_sentiment)
+                except Exception:
+                    sentiment_data = {"sentiment": "neutral", "score": 50, "confidence": 0.3,
+                                      "key_signals": [], "summary": raw_sentiment[:200]}
+
+                score = sentiment_data.get("score", 50)
+                sentiment = sentiment_data.get("sentiment", "neutral")
+                signals = sentiment_data.get("key_signals", [])
+
+                # Store structured output in variables for downstream steps
+                variables["_sentiment_data"] = json.dumps(sentiment_data)
+                variables["_sentiment_label"] = sentiment
+                variables["_sentiment_score"] = str(score)
+
+                emoji = "🟢" if sentiment == "bullish" else ("🔴" if sentiment == "bearish" else "⚖️")
+                result = {
+                    "success": True,
+                    "output": (
+                        f"{emoji} Sentiment: {sentiment.upper()} (Score: {score}/100)\n"
+                        f"Confidence: {sentiment_data.get('confidence', 'N/A')}\n"
+                        f"Signals: {', '.join(signals[:3]) if signals else 'None detected'}\n"
+                        f"Summary: {sentiment_data.get('summary', 'N/A')}"
+                    ),
+                    "sentiment_data": sentiment_data,
+                }
+                logger.info("📊 Sentiment analysis: %s (score=%s)", sentiment, score)
+
+        elif action_type == "execute_dex_swap":
+            # ── NEW: Build unsigned Algorand TX + trigger Telegram approval prompt ──
+            from algorand_indexer import execute_dex_swap_action
+            from paper_engine import get_user
+
+            tg_id = config.get("tg_id") or variables.get("_tg_id")
+            amount_algo = float(config.get("amount_algo", 1.0))
+
+            # Determine amount dynamically if configured
+            if config.get("dynamic_amount") and "_sentiment_score" in variables:
+                score = int(variables.get("_sentiment_score", 50))
+                if score < 30:
+                    amount_algo = float(config.get("bearish_amount", 5.0))
+                elif score < 50:
+                    amount_algo = float(config.get("cautious_amount", 2.0))
+                else:
+                    amount_algo = float(config.get("amount_algo", 1.0))
+
+            reason = _interpolate(config.get("reason", "Autonomous DeFi Agent swap"), variables)
+
+            # Get user's connected wallet
+            user = await get_user(int(tg_id)) if tg_id else None
+            sender_address = user.get("algo_address", "") if user else ""
+
+            # Parse sentiment data if available
+            sentiment_data = None
+            if "_sentiment_data" in variables:
+                try:
+                    sentiment_data = json.loads(variables["_sentiment_data"])
+                except Exception:
+                    pass
+
+            swap_result = await execute_dex_swap_action(
+                tg_id=int(tg_id),
+                sender_address=sender_address,
+                amount_algo=amount_algo,
+                reason=reason,
+                sentiment_data=sentiment_data,
+            )
+
+            result = {
+                "success": swap_result.get("success", False),
+                "output": swap_result.get("output", "Swap action failed"),
+                "pending_tx_id": swap_result.get("pending_tx_id"),
+            }
+
         else:
             result = {"success": False, "output": f"Unknown action type: {action_type}"}
 
@@ -516,6 +631,11 @@ async def execute_workflow(workflow: dict) -> dict:
     variables["_workflow_id"] = wf_id
     variables["_timestamp"] = datetime.now(timezone.utc).isoformat()
 
+    # Merge any injected variables from trigger evaluation (e.g., on-chain events)
+    injected = workflow.get("_injected_variables", {})
+    if injected:
+        variables.update(injected)
+
     log_id = f"log_{uuid.uuid4().hex[:10]}"
     now = datetime.now(timezone.utc).isoformat()
     steps_log = []
@@ -552,7 +672,7 @@ async def execute_workflow(workflow: dict) -> dict:
             # before downstream steps (transform, send_message) can use them.
             data_producing_types = {
                 "fetch_rss", "web_scrape", "stock_lookup", "ai_analyze",
-                "youtube_research", "http_request",
+                "youtube_research", "http_request", "analyze_sentiment",
             }
             if step_type in data_producing_types and (not step_success or len(step_output.strip()) < 10):
                 halted_early = True
@@ -656,6 +776,19 @@ async def evaluate_workflows():
             elif trigger_type == "manual":
                 pass  # Only fires on /run_workflow command
 
+            elif trigger_type == "on_chain_event":
+                # ── NEW: Algorand on-chain event trigger ──
+                from algorand_indexer import check_on_chain_events
+                fired, event_data = await check_on_chain_events(trigger_config)
+                if fired:
+                    should_fire = True
+                    # Inject event data into workflow variables for downstream steps
+                    wf["_injected_variables"] = {
+                        "_whale_txn": json.dumps(event_data.get("whale_txn", {})),
+                        "_whale_count": str(event_data.get("count", 0)),
+                        "_chain_event": json.dumps(event_data),
+                    }
+
             if should_fire:
                 logger.info("🔥 Workflow %s (%s) TRIGGERED", wf["id"], wf["name"])
                 result = await execute_workflow(wf)
@@ -734,42 +867,90 @@ async def parse_workflow_from_nl(text: str, tg_id: int) -> dict:
     groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
     system_prompt = (
-        "You are a JSON-only automation workflow builder. "
+        "You are a JSON-only Autonomous DeFi Agent workflow builder. "
         "You MUST respond with ONLY a single raw JSON object. "
         "Do NOT include any markdown formatting, code fences, backticks, "
         "introductory text, explanations, or trailing commentary. "
         "Your entire response must be parseable by json.loads() directly.\n\n"
-        "CRITICAL RULE: If the user's request involves news, headlines, articles, blog posts, "
-        "or any form of content aggregation, you MUST use the \"fetch_rss\" action type with a "
-        "real RSS feed URL. You MUST NEVER use \"web_scrape\" for news. web_scrape will FAIL on "
-        "news sites because they block bots. fetch_rss is the ONLY reliable method for news."
+        "CRITICAL RULES:\n"
+        "1. If the user's request involves news/headlines/articles → use \"fetch_rss\" with a real RSS URL. NEVER \"web_scrape\".\n"
+        "2. If the user wants sentiment analysis → chain fetch_rss → analyze_sentiment.\n"
+        "3. If the user wants autonomous trading/swaps based on sentiment → chain: fetch_rss → analyze_sentiment → execute_dex_swap.\n"
+        "4. For on-chain whale detection → use trigger_type \"on_chain_event\".\n"
+        "5. Steps reference previous step output via {{step_N_output}} variables."
     )
 
     user_prompt = f"""Parse this user request into a workflow JSON.
 
 User request: "{text}"
 
-Available action types (in order of preference):
-1. "fetch_rss": Fetch news/articles from an RSS feed. MANDATORY for any news request. config: {{"feed_url": "https://...", "max_items": 5}}
-   Known working RSS feeds:
-     Crypto/Blockchain: "https://cointelegraph.com/rss"
+═══ AVAILABLE ACTION TYPES (in order of preference) ═══
+
+1. "fetch_rss": Fetch news/articles from RSS. MANDATORY for any news request.
+   config: {{"feed_url": "https://...", "max_items": 5}}
+   Known RSS feeds:
+     Crypto: "https://cointelegraph.com/rss"
      Crypto alt: "https://www.coindesk.com/arc/outboundfeeds/rss/"
      Tech: "https://feeds.arstechnica.com/arstechnica/index"
-     Hacker News: "https://hnrss.org/frontpage"
      Finance: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US"
      AI/ML: "https://news.mit.edu/topic/mitartificial-intelligence2-rss.xml"
      General: "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml"
-2. "ai_analyze": Run AI swarm analysis. config: {{"prompt": "what to analyze"}}
-3. "stock_lookup": Get stock price data. config: {{"ticker": "AAPL"}}
-4. "youtube_research": Analyze a YouTube video. config: {{"url": "youtube url"}}
-5. "send_message": Send Telegram message. config: {{"message": "text", "tg_id": {tg_id}}}
-6. "http_request": Make HTTP call. config: {{"url": "...", "method": "GET"}}
-7. "web_scrape": Scrape a specific non-news webpage ONLY. config: {{"query": "search query"}}
-8. "condition": Check a condition. config: {{"condition": "expression"}}
-9. "delay": Wait N seconds. config: {{"seconds": 10}}
-10. "transform": Format data. config: {{"template": "text with {{{{variables}}}}"}}
+     Algorand/Web3: "https://cointelegraph.com/rss"
 
-EXAMPLE — "Every 10 minutes fetch crypto news and send it to me":
+2. "analyze_sentiment": LLM sentiment analysis of text (usually RSS output). Returns bearish/bullish/neutral + score 0-100.
+   config: {{"text": "{{{{step_N_output}}}}"}}  (leave empty to auto-use previous step output)
+
+3. "execute_dex_swap": Build unsigned ALGO→USDC swap & send Telegram approval button.
+   config: {{"amount_algo": 2.0, "reason": "Bearish sentiment protection", "tg_id": {tg_id}, "dynamic_amount": true, "bearish_amount": 5.0, "cautious_amount": 2.0}}
+   - If dynamic_amount=true: amount scales based on sentiment score (bearish=bearish_amount, cautious=cautious_amount)
+   - User must have /connect_wallet linked. They approve the swap in the Mini App.
+
+4. "ai_analyze": Run AI swarm analysis. config: {{"prompt": "what to analyze"}}
+5. "stock_lookup": Get stock price data. config: {{"ticker": "AAPL"}}
+6. "youtube_research": Analyze a YouTube video. config: {{"url": "youtube url"}}
+7. "send_message": Send Telegram message. config: {{"message": "{{{{step_N_output}}}}", "tg_id": {tg_id}}}
+8. "http_request": Make HTTP call. config: {{"url": "...", "method": "GET"}}
+9. "web_scrape": Scrape a specific non-news webpage ONLY. config: {{"query": "search query"}}
+10. "condition": Check a condition. config: {{"condition": "expression"}}
+11. "delay": Wait N seconds. config: {{"seconds": 10}}
+12. "transform": Format data. config: {{"template": "text with {{{{variables}}}}"}}
+
+═══ AVAILABLE TRIGGER TYPES ═══
+
+- "interval": Repeat every N minutes. config: {{"interval_minutes": 60}}
+- "price_threshold": When stock hits price. config: {{"ticker": "AAPL", "threshold": 150, "direction": "below"}}
+- "on_chain_event": Algorand on-chain events (whale alerts). config: {{"event_type": "whale_transfer", "min_algo": 10000, "watch_address": ""}}
+- "time_once": Run at specific time. config: {{"at": "ISO datetime"}}
+- "manual": Only runs when user triggers it.
+
+═══ EXAMPLE PIPELINES ═══
+
+EXAMPLE 1 — "Fetch crypto news, analyze sentiment, and swap if bearish":
+{{
+  "name": "DeFi Sentiment Guard",
+  "description": "Monitors crypto news, analyzes sentiment, triggers protective swap if bearish",
+  "trigger_type": "interval",
+  "trigger_config": {{"interval_minutes": 30}},
+  "steps": [
+    {{"name": "Fetch Crypto News", "type": "fetch_rss", "config": {{"feed_url": "https://cointelegraph.com/rss", "max_items": 5}}}},
+    {{"name": "Analyze Sentiment", "type": "analyze_sentiment", "config": {{}}}},
+    {{"name": "Execute Swap", "type": "execute_dex_swap", "config": {{"amount_algo": 2.0, "reason": "Bearish news detected — protective ALGO→USDC swap", "tg_id": {tg_id}, "dynamic_amount": true, "bearish_amount": 5.0, "cautious_amount": 2.0}}}}
+  ]
+}}
+
+EXAMPLE 2 — "When a whale moves >10K ALGO, alert me and analyze":
+{{
+  "name": "Whale Alert Pipeline",
+  "description": "Detects large Algorand transfers and sends analysis",
+  "trigger_type": "on_chain_event",
+  "trigger_config": {{"event_type": "whale_transfer", "min_algo": 10000}},
+  "steps": [
+    {{"name": "Analyze Event", "type": "ai_analyze", "config": {{"prompt": "A whale just moved {{{{_whale_txn}}}} on Algorand. What does this mean for the market?"}}}},
+    {{"name": "Notify User", "type": "send_message", "config": {{"message": "🐋 Whale Alert!\\n\\n{{{{step_1_output}}}}", "tg_id": {tg_id}}}}}
+  ]
+}}
+
+EXAMPLE 3 — "Every 10 minutes fetch crypto news and send it to me":
 {{
   "name": "Crypto News Feed",
   "description": "Fetches latest crypto news from CoinTelegraph RSS and sends to user",
@@ -782,17 +963,14 @@ EXAMPLE — "Every 10 minutes fetch crypto news and send it to me":
 }}
 
 RULES:
-- For ANY request involving "news", "headlines", "articles", "updates", or "latest" → use "fetch_rss". NEVER "web_scrape".
-- send_message should reference data from earlier steps using {{{{step_N_output}}}} (N = step number).
-- Pick the most relevant RSS feed URL from the list above based on the user's topic.
+- For ANY request involving "news", "headlines", "articles", "updates", "latest" → use "fetch_rss". NEVER "web_scrape".
+- For sentiment/mood/market-feel → chain fetch_rss → analyze_sentiment.
+- For autonomous trading/protection/swap → chain fetch_rss → analyze_sentiment → execute_dex_swap.
+- For whale watching/large transfers → use trigger_type "on_chain_event".
+- send_message should reference data from earlier steps using {{{{step_N_output}}}}.
+- Pick the most relevant RSS feed URL based on the user's topic.
 
-Available trigger types:
-- "interval": Repeat every N minutes. config: {{"interval_minutes": 60}}
-- "price_threshold": When stock hits price. config: {{"ticker": "AAPL", "threshold": 150, "direction": "below"}}
-- "time_once": Run at specific time. config: {{"at": "ISO datetime"}}
-- "manual": Only runs when user triggers it.
-
-Respond with ONLY this JSON structure (no other text):
+Respond with ONLY this JSON structure:
 {{
     "name": "short name",
     "description": "what this workflow does",
