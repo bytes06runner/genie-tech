@@ -1131,37 +1131,71 @@ async def cmd_transact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════════
 
 async def cmd_whale_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually check for recent whale transactions on Algorand TestNet."""
-    from algorand_indexer import poll_large_transactions
+    """Scan DEX markets for whale-level USD buy/sell activity."""
+    from dex_screener import scan_whale_activity
 
-    min_algo = 10_000.0
+    min_vol = 100_000.0  # default $100K minimum
     if context.args:
         try:
-            min_algo = float(context.args[0])
+            min_vol = float(context.args[0].replace(",", "").replace("$", "").replace("k", "000").replace("K", "000"))
         except ValueError:
             pass
 
     await update.message.reply_text(
-        f"🐋 _Scanning Algorand TestNet for transfers > {min_algo:,.0f} ALGO…_",
+        f"🐋 _Scanning DEX markets for whale activity (>${min_vol:,.0f} USD volume)…_",
         parse_mode=ParseMode.MARKDOWN,
     )
 
     try:
-        whales = await poll_large_transactions(min_algo=min_algo, limit=10)
+        whales = await scan_whale_activity(min_volume_usd=min_vol, limit=8)
         if not whales:
             await update.message.reply_text(
-                f"No whale transactions found (>{min_algo:,.0f} ALGO) in recent blocks.",
+                f"No whale activity found above ${min_vol:,.0f} USD volume right now.\n\n"
+                f"💡 Try a lower threshold: `/whale_alert 50000`",
+                parse_mode=ParseMode.MARKDOWN,
             )
             return
 
-        text = f"🐋 *Whale Alert — {len(whales)} Large Transfers*\n\n"
-        for i, w in enumerate(whales[:5], 1):
+        text = f"🐋 *Whale Alert — {len(whales)} Large USD Movements*\n\n"
+        for i, w in enumerate(whales[:8], 1):
+            price = float(w.get("price_usd", 0))
+            if price >= 1:
+                price_str = f"${price:,.2f}"
+            elif price >= 0.001:
+                price_str = f"${price:.4f}"
+            else:
+                price_str = f"${price:.8f}"
+
+            # Buy/Sell bar
+            total = w["buys_1h"] + w["sells_1h"]
+            if total > 0:
+                buy_pct = w["buys_1h"] / total * 100
+                bar_len = 10
+                green = round(buy_pct / 100 * bar_len)
+                red = bar_len - green
+                bar = "🟩" * green + "🟥" * red
+            else:
+                bar = "⬜" * 10
+
             text += (
-                f"{i}. `{w['amount_algo']:,.2f}` ALGO\n"
-                f"   From: `{w['sender'][:12]}…`\n"
-                f"   To: `{w['receiver'][:12]}…`\n"
-                f"   Round: `{w['round']}` | Fee: `{w['fee']} ALGO`\n\n"
+                f"{i}. {w['whale_type']} *{w['symbol']}* ({w['chain']})\n"
+                f"   💰 Price: `{price_str}`\n"
+                f"   📊 Vol 1h: `${w['volume_1h']:,.0f}` | 24h: `${w['volume_24h']:,.0f}`\n"
+                f"   🛒 Buys: `{w['buys_1h']}` | 🏷 Sells: `{w['sells_1h']}` (1h)\n"
+                f"   {bar}\n"
+                f"   💧 Liq: `${w['liquidity_usd']:,.0f}` | V/L: `{w['vol_liq_ratio']}×`\n"
+                f"   Δ1h: `{w['price_change_1h']:+.2f}%` | Δ24h: `{w['price_change_24h']:+.2f}%`\n\n"
             )
+
+        text += (
+            "───────────────────\n"
+            "🟢 = Massive buying pressure\n"
+            "🔴 = Heavy selling / dump\n"
+            "🟡 = Volume spike vs liquidity\n"
+            "⚡ = Rapid short-term flow\n\n"
+            f"_Min threshold: ${min_vol:,.0f} USD_\n"
+            "💡 `/whale_alert 50000` to adjust"
+        )
 
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
@@ -1983,7 +2017,7 @@ async def post_init(application):
         BotCommand("transact", "Algorand Web3 Bridge"),
         BotCommand("disconnect", "Remove wallet"),
         BotCommand("reset_wallet", "Force-clear wallet"),
-        BotCommand("whale_alert", "Scan for whale transactions"),
+        BotCommand("whale_alert", "Scan for large USD buy/sell whales"),
         BotCommand("pending_swaps", "View pending DeFi swaps"),
         BotCommand("dex", "DEX Screener token search"),
         BotCommand("dex_trending", "Trending tokens + AI analysis"),

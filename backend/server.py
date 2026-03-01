@@ -13,6 +13,9 @@ Endpoints:
 import asyncio
 import json
 import logging
+import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -90,7 +93,40 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     set_broadcast(ws_broadcast)
     log_memory("Server", "X10V backend started.")
+
+    # ── Initialize DEX Automation engine ──
+    from dex_automation import init_dex_automation_db, set_automation_broadcast, evaluate_dex_orders
+    await init_dex_automation_db()
+    set_automation_broadcast(ws_broadcast)
+
+    # ── Start DEX order evaluation scheduler (every 60s) ──
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    dex_auto_scheduler = AsyncIOScheduler()
+    dex_auto_scheduler.add_job(evaluate_dex_orders, "interval", seconds=60, id="dex_order_eval")
+    dex_auto_scheduler.start()
+    logger.info("⚡ DEX Automation scheduler started (60s interval)")
+
+    # ── Launch Telegram bot as a subprocess ──
+    env = os.environ.copy()
+    env["TOKENIZERS_PARALLELISM"] = "false"
+    tg_proc = subprocess.Popen(
+        [sys.executable, "tg_bot.py"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    logger.info("🤖 Telegram bot subprocess started (PID %s)", tg_proc.pid)
+
     yield
+
+    # ── Shutdown: kill the bot subprocess ──
+    logger.info("Stopping Telegram bot subprocess (PID %s)…", tg_proc.pid)
+    tg_proc.terminate()
+    try:
+        tg_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        tg_proc.kill()
     logger.info("X10V Backend — Shutting down.")
 
 
@@ -483,6 +519,92 @@ async def dex_boosted():
             await _aio.sleep(0.15)
 
     return {"tokens": enriched}
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  DEX AUTOMATION — Smart order engine
+# ═══════════════════════════════════════════════════════════════════
+
+class CreateDexOrderRequest(BaseModel):
+    symbol: str = Field(..., example="PEPE")
+    chain: str = Field(default="", example="solana")
+    side: str = Field(..., example="buy")
+    target_price: float = Field(..., example=0.00001)
+    amount_usd: float = Field(default=100.0, example=100.0)
+    stop_loss: float = Field(default=0, example=0.000008)
+    take_profit: float = Field(default=0, example=0.000015)
+    wallet_address: str = Field(default="", example="")
+    dex: str = Field(default="", example="raydium")
+    pair_address: str = Field(default="", example="")
+    search_query: str = Field(default="", example="PEPE")
+
+
+@app.post("/api/dex/orders")
+async def create_dex_order(req: CreateDexOrderRequest):
+    """Create a new smart DEX order with AI-powered execution."""
+    from dex_automation import create_order
+    order = await create_order(
+        symbol=req.symbol,
+        chain=req.chain,
+        side=req.side,
+        target_price=req.target_price,
+        amount_usd=req.amount_usd,
+        wallet_address=req.wallet_address,
+        stop_loss=req.stop_loss,
+        take_profit=req.take_profit,
+        dex=req.dex,
+        pair_address=req.pair_address,
+        search_query=req.search_query,
+    )
+    await ws_broadcast(
+        f"[DexAuto] 📝 New {req.side.upper()} order: {req.symbol} @ ${req.target_price}"
+    )
+    return {"status": "created", "order": order}
+
+
+@app.get("/api/dex/orders")
+async def list_dex_orders(user_id: str = "web", active_only: bool = False):
+    """List DEX orders for a user."""
+    from dex_automation import get_active_orders, get_all_orders
+    if active_only:
+        orders = await get_active_orders(user_id)
+    else:
+        orders = await get_all_orders(user_id)
+    return {"orders": orders}
+
+
+@app.delete("/api/dex/orders/{order_id}")
+async def cancel_dex_order(order_id: str):
+    """Cancel an active DEX order."""
+    from dex_automation import cancel_order
+    success = await cancel_order(order_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Order not found or already completed")
+    return {"status": "cancelled", "order_id": order_id}
+
+
+@app.post("/api/dex/analyze")
+async def analyze_token(body: dict):
+    """Run AI analysis on a specific token for trade recommendation."""
+    from dex_automation import analyze_token_for_trade
+    symbol = body.get("symbol", "")
+    chain = body.get("chain", "")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    result = await analyze_token_for_trade(symbol, chain)
+    return result
+
+
+@app.get("/api/dex/wallet/balance")
+async def get_wallet_balance(address: str):
+    """Get Algorand wallet balance for connected address."""
+    from algorand_indexer import get_algo_balance
+    if not address:
+        raise HTTPException(status_code=400, detail="address is required")
+    balance = await get_algo_balance(address)
+    if not balance:
+        raise HTTPException(status_code=404, detail="Could not fetch balance")
+    return balance
 
 
 # ═══════════════════════════════════════════════════════════════════

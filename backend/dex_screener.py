@@ -238,6 +238,119 @@ def format_pair_telegram(pair_data: dict) -> str:
 # ═══════════════════════════════════════════════════════════════════
 #  AI-POWERED OPPORTUNITY DETECTION — 3-LLM Swarm Analysis
 # ═══════════════════════════════════════════════════════════════════
+#  WHALE DETECTOR — Scan for large USD buy/sell activity
+# ═══════════════════════════════════════════════════════════════════
+
+async def scan_whale_activity(min_volume_usd: float = 100_000, limit: int = 10) -> list[dict]:
+    """
+    Scan DEX Screener for tokens showing whale-level activity.
+    Whales are identified by:
+      - Extremely high USD volume in short timeframes (5m, 1h)
+      - Large buy/sell imbalances (massive one-sided pressure)
+      - Volume spikes relative to liquidity (> 2× liq = whale dump/pump)
+    Returns a list of whale events sorted by volume intensity.
+    """
+    whale_events: list[dict] = []
+
+    # Strategy 1: Scan boosted/trending tokens for volume spikes
+    boosted = await get_top_boosted()
+    if not boosted:
+        boosted = await get_latest_boosted()
+
+    profiles = await get_latest_profiles()
+
+    # Combine and deduplicate token candidates
+    candidates: list[dict] = []
+    seen = set()
+    for src in [boosted or [], profiles or []]:
+        for token in src[:15]:
+            chain = token.get("chainId", "")
+            addr = token.get("tokenAddress", "")
+            key = f"{chain}:{addr}"
+            if chain and addr and key not in seen:
+                seen.add(key)
+                candidates.append(token)
+
+    # Fetch pair data for each candidate
+    for token in candidates[:20]:
+        chain = token.get("chainId", "")
+        addr = token.get("tokenAddress", "")
+        pairs = await get_token_data(chain, addr)
+        if not pairs:
+            await asyncio.sleep(0.15)
+            continue
+
+        best = max(pairs, key=lambda p: p.get("volume", {}).get("h24", 0))
+        pd = format_pair_data(best)
+
+        vol_24h = pd.get("volume_24h", 0)
+        vol_1h = pd.get("volume_1h", 0)
+        vol_5m = pd.get("volume_5m", 0)
+        liq = pd.get("liquidity_usd", 0) or 1  # avoid div/0
+
+        buys_1h = pd.get("buys_1h", 0)
+        sells_1h = pd.get("sells_1h", 0)
+        buys_24h = pd.get("buys_24h", 0)
+        sells_24h = pd.get("sells_24h", 0)
+
+        # Skip if below minimum volume threshold
+        if vol_24h < min_volume_usd and vol_1h < (min_volume_usd / 24):
+            await asyncio.sleep(0.15)
+            continue
+
+        # Calculate whale indicators
+        vol_liq_ratio = vol_24h / liq if liq > 0 else 0
+        buy_sell_diff_1h = abs(buys_1h - sells_1h)
+        buy_sell_diff_24h = abs(buys_24h - sells_24h)
+
+        # Determine whale type
+        if buys_1h > sells_1h * 2 and vol_1h > 50_000:
+            whale_type = "🟢 WHALE BUY"
+            intensity = buys_1h / max(sells_1h, 1)
+        elif sells_1h > buys_1h * 2 and vol_1h > 50_000:
+            whale_type = "🔴 WHALE SELL"
+            intensity = sells_1h / max(buys_1h, 1)
+        elif vol_liq_ratio > 2.0:
+            whale_type = "🟡 VOLUME SPIKE"
+            intensity = vol_liq_ratio
+        elif vol_5m > 20_000:
+            whale_type = "⚡ RAPID FLOW"
+            intensity = vol_5m / 1000
+        else:
+            whale_type = "📊 HIGH VOLUME"
+            intensity = vol_24h / 100_000
+
+        whale_events.append({
+            "symbol": pd.get("symbol", "???"),
+            "name": pd.get("name", "Unknown"),
+            "chain": pd.get("chain", ""),
+            "dex": pd.get("dex", ""),
+            "price_usd": pd.get("price_usd", "0"),
+            "whale_type": whale_type,
+            "intensity": round(intensity, 2),
+            "volume_5m": vol_5m,
+            "volume_1h": vol_1h,
+            "volume_24h": vol_24h,
+            "liquidity_usd": liq,
+            "vol_liq_ratio": round(vol_liq_ratio, 2),
+            "buys_1h": buys_1h,
+            "sells_1h": sells_1h,
+            "buys_24h": buys_24h,
+            "sells_24h": sells_24h,
+            "price_change_1h": pd.get("price_change_1h", 0),
+            "price_change_24h": pd.get("price_change_24h", 0),
+            "market_cap": pd.get("market_cap", 0),
+            "url": pd.get("url", ""),
+        })
+
+        await asyncio.sleep(0.15)
+
+    # Sort by intensity (strongest whale signals first)
+    whale_events.sort(key=lambda x: x["intensity"], reverse=True)
+    return whale_events[:limit]
+
+
+# ═══════════════════════════════════════════════════════════════════
 
 async def analyze_opportunity(pairs: list[dict]) -> dict:
     """
