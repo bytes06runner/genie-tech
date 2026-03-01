@@ -101,6 +101,21 @@ from algorand_indexer import (
     get_account_transactions,
     DEFAULT_SENDER,
 )
+from dex_screener import (
+    search_pairs,
+    get_top_boosted,
+    get_trending_with_analysis,
+    format_pair_data,
+    format_pair_telegram,
+    analyze_opportunity,
+    subscribe_alerts,
+    unsubscribe_alerts,
+    get_alert_status,
+    init_dex_db,
+    set_dex_notify,
+    load_all_subscribers,
+    evaluate_dex_alerts,
+)
 
 load_dotenv()
 
@@ -354,6 +369,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  `/transact` — Algorand Web3 Bridge\n"
         "  `/disconnect` — Remove wallet\n"
         "  `/reset_wallet` — Force-clear wallet\n\n"
+
+        "━━━ 📡 *DEX Screener* ━━━\n"
+        "  `/dex <token>` — Search token (buyers, sellers, volume)\n"
+        "  `/dex_trending` — Trending tokens + AI analysis\n"
+        "  `/dex_alerts on` — Enable smart DEX notifications\n"
+        "  `/dex_alerts off` — Disable notifications\n\n"
 
         "_Type naturally — the AI understands rules, schedules, and queries from plain text!_"
     )
@@ -1493,6 +1514,235 @@ async def cmd_trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  DEX SCREENER — Token Search, Buyer/Seller Data, AI Alerts
+# ═══════════════════════════════════════════════════════════════════
+
+async def cmd_dex(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Search DEX Screener for any token — shows buyers, sellers, volume, AI analysis."""
+    if not context.args:
+        await update.message.reply_text(
+            "🔍 *DEX Screener — Token Intelligence*\n\n"
+            "*Usage:* `/dex <token_name_or_symbol>`\n\n"
+            "*Examples:*\n"
+            "• `/dex PEPE` — Search PEPE memecoin\n"
+            "• `/dex SOL/USDC` — Search SOL/USDC pair\n"
+            "• `/dex BONK` — Search BONK token\n"
+            "• `/dex ALGO` — Search Algorand pairs\n"
+            "• `/dex dogwifhat` — Search by token name\n\n"
+            "Shows: price, volume, liquidity, buyers vs sellers, AI analysis\n\n"
+            "🔔 *Want alerts?* Use `/dex_alerts on`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    query = " ".join(context.args)
+    await update.message.reply_text(
+        f"🔍 _Searching DEX Screener for_ `{query}` …\n"
+        f"_Fetching buyer/seller data + running AI analysis_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    try:
+        pairs = await search_pairs(query)
+        if not pairs:
+            await update.message.reply_text(
+                f"⚠️ No pairs found for `{query}`. Try a different name or symbol.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        # Format top 3 pairs
+        formatted = [format_pair_data(p) for p in pairs[:3]]
+
+        msg = f"🔍 *DEX Screener: {query.upper()}*\n"
+        msg += f"_Found {len(pairs)} pairs — showing top {min(3, len(pairs))}_\n\n"
+
+        for i, pd in enumerate(formatted, 1):
+            msg += f"━━━ *#{i}* ━━━\n"
+            msg += format_pair_telegram(pd)
+            if pd.get("url"):
+                msg += f"🔗 [View on DEX Screener]({pd['url']})\n"
+            msg += "\n"
+
+        # Run AI analysis on the top results
+        try:
+            analysis = await analyze_opportunity(pairs[:5])
+            sd = analysis.get("structured_data", {})
+            summary = sd.get("summary", "")
+            if summary:
+                msg += f"🧠 *AI Swarm Analysis:*\n_{_sanitize_markdown(summary[:600])}_\n\n"
+
+            metrics = sd.get("timeline_or_metrics", [])
+            if metrics:
+                msg += "📊 *Key Signals:*\n"
+                for m in metrics[:5]:
+                    msg += f"  • *{m.get('key', '')}:* {m.get('value', '')}\n"
+                msg += "\n"
+        except Exception as ai_err:
+            logger.warning("AI analysis failed for DEX query: %s", ai_err)
+
+        msg = _sanitize_markdown(msg)
+        try:
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        except Exception:
+            await update.message.reply_text(msg, disable_web_page_preview=True)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ DEX search failed: {str(e)[:200]}")
+
+    log_memory("TelegramBot", f"/dex {query}")
+
+
+async def cmd_dex_trending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show trending/boosted tokens with AI-powered opportunity analysis."""
+    await update.message.reply_text(
+        "📈 _Fetching trending tokens from DEX Screener…_\n"
+        "_Running 3-LLM Swarm analysis for trade opportunities_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    try:
+        result = await get_trending_with_analysis()
+        tokens = result.get("tokens", [])
+        analysis = result.get("analysis")
+
+        if not tokens:
+            await update.message.reply_text("⚠️ No trending tokens found. Try again in a few minutes.")
+            return
+
+        msg = f"📈 *DEX Screener — Trending Tokens*\n"
+        msg += f"_Top {len(tokens)} boosted tokens with AI analysis_\n\n"
+
+        for i, t in enumerate(tokens[:6], 1):
+            bs_ratio = t.get('buy_sell_ratio_1h', 0)
+            if bs_ratio >= 999:
+                ratio_str = "∞"
+            elif bs_ratio == 0:
+                ratio_str = "0"
+            else:
+                ratio_str = f"{bs_ratio:.2f}"
+
+            if bs_ratio > 1.5:
+                emoji = "🟢"
+            elif bs_ratio > 1.0:
+                emoji = "🟡"
+            elif bs_ratio > 0.7:
+                emoji = "🟠"
+            else:
+                emoji = "🔴"
+
+            msg += (
+                f"*#{i}* {emoji} *{t['symbol']}* ({t['chain']})\n"
+                f"  💰 `${float(t.get('price_usd', 0)):.6f}`\n"
+                f"  📊 Vol: `${t.get('volume_24h', 0):,.0f}` | Liq: `${t.get('liquidity_usd', 0):,.0f}`\n"
+                f"  🔄 Buys: `{t.get('buys_1h', 0)}` | Sells: `{t.get('sells_1h', 0)}` | Ratio: `{ratio_str}`\n"
+                f"  Δ1h: `{t.get('price_change_1h', 0):+.2f}%`"
+                f" | Δ24h: `{t.get('price_change_24h', 0):+.2f}%`\n\n"
+            )
+
+        if analysis:
+            sd = analysis.get("structured_data", {})
+            summary = sd.get("summary", "")
+            if summary:
+                msg += f"🧠 *AI Swarm Verdict:*\n_{_sanitize_markdown(summary[:500])}_\n\n"
+
+            metrics = sd.get("timeline_or_metrics", [])
+            if metrics:
+                msg += "📊 *Opportunity Scores:*\n"
+                for m in metrics[:6]:
+                    msg += f"  • *{m.get('key', '')}:* {m.get('value', '')}\n"
+                msg += "\n"
+
+        msg += "_Powered by DEX Screener + 3-LLM Swarm_"
+
+        msg = _sanitize_markdown(msg)
+        try:
+            await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
+        except Exception:
+            await update.message.reply_text(msg, disable_web_page_preview=True)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Trending fetch failed: {str(e)[:200]}")
+
+    log_memory("TelegramBot", "/dex_trending")
+
+
+async def cmd_dex_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manage DEX Screener alert subscriptions."""
+    tg_id = update.effective_user.id
+    args = context.args or []
+
+    if not args:
+        # Show current status
+        status = await get_alert_status(tg_id)
+        if status and status.get("enabled"):
+            await update.message.reply_text(
+                "🔔 *DEX Screener Alerts — Active*\n\n"
+                f"📡 Chain: `{status.get('chain', 'all')}`\n"
+                f"📊 Min Volume: `${status.get('min_volume', 50000):,.0f}`\n"
+                f"💧 Min Liquidity: `${status.get('min_liquidity', 10000):,.0f}`\n"
+                f"⏱️ Scan Interval: Every 5 minutes\n\n"
+                "*Commands:*\n"
+                "• `/dex_alerts off` — Turn off alerts\n"
+                "• `/dex_alerts on` — Re-enable alerts\n"
+                "• `/dex_alerts on solana` — Filter by chain\n"
+                "• `/dex_alerts on ethereum 100000` — Chain + min volume\n"
+                "• `/dex_alerts on all 100000 25000` — All chains, custom thresholds",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text(
+                "🔕 *DEX Screener Alerts — Inactive*\n\n"
+                "Get notified when the AI Swarm detects high-volume "
+                "trade opportunities on DEX Screener.\n\n"
+                "The bot scans trending tokens every 5 minutes, "
+                "analyzes them with 3 LLMs, and alerts you about "
+                "coins with strong buying pressure.\n\n"
+                "*Enable:*\n"
+                "• `/dex_alerts on` — All chains, default filters\n"
+                "• `/dex_alerts on solana` — Solana only\n"
+                "• `/dex_alerts on ethereum 100000` — ETH, vol > $100K\n"
+                "• `/dex_alerts on all 200000 50000` — Custom thresholds",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        return
+
+    action = args[0].lower()
+
+    if action == "off":
+        await unsubscribe_alerts(tg_id)
+        await update.message.reply_text(
+            "🔕 *DEX alerts disabled.*\nUse `/dex_alerts on` to re-enable.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if action == "on":
+        chain = args[1].lower() if len(args) > 1 else "all"
+        min_vol = float(args[2]) if len(args) > 2 else 50000
+        min_liq = float(args[3]) if len(args) > 3 else 10000
+
+        await subscribe_alerts(tg_id, chain=chain, min_volume=min_vol, min_liquidity=min_liq)
+        await update.message.reply_text(
+            "🔔 *DEX Screener Alerts — Enabled!*\n\n"
+            f"📡 Chain: `{chain}`\n"
+            f"📊 Min Volume: `${min_vol:,.0f}`\n"
+            f"💧 Min Liquidity: `${min_liq:,.0f}`\n"
+            f"⏱️ Scanning every 5 minutes\n\n"
+            "The 3-LLM Swarm will analyze trending tokens and alert you "
+            "about coins with high volume and strong buying pressure.\n\n"
+            "Use `/dex_alerts off` to disable.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    await update.message.reply_text(
+        "⚠️ Unknown option. Use `/dex_alerts on` or `/dex_alerts off`.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  INTELLIGENT FREE-TEXT HANDLER (3-LLM Swarm + Intent Detection)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1549,6 +1799,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "transact": cmd_transact,
             "whale_alert": cmd_whale_alert,
             "pending_swaps": cmd_pending_swaps,
+            "dex": cmd_dex,
+            "dex_trending": cmd_dex_trending,
+            "dex_alerts": cmd_dex_alerts,
             "start": cmd_start,
             "help": cmd_help,
         }
@@ -1732,6 +1985,9 @@ async def post_init(application):
         BotCommand("reset_wallet", "Force-clear wallet"),
         BotCommand("whale_alert", "Scan for whale transactions"),
         BotCommand("pending_swaps", "View pending DeFi swaps"),
+        BotCommand("dex", "DEX Screener token search"),
+        BotCommand("dex_trending", "Trending tokens + AI analysis"),
+        BotCommand("dex_alerts", "DEX alert notifications"),
     ]
     await application.bot.set_my_commands(commands)
     logger.info("✅ Bot commands registered (30 commands)")
@@ -1749,6 +2005,8 @@ def main():
     loop = _aio.new_event_loop()
     loop.run_until_complete(init_automation_db())
     loop.run_until_complete(init_indexer_db())
+    loop.run_until_complete(init_dex_db())
+    loop.run_until_complete(load_all_subscribers())
     loop.close()
 
     # Wire up notify callbacks
@@ -1757,6 +2015,7 @@ def main():
     set_automation_notify(tg_notify)
     set_indexer_notify(tg_notify)
     set_swap_prompt_callback(tg_send_swap_prompt)
+    set_dex_notify(tg_notify)
 
     # Start market monitor scheduler
     start_monitor_scheduler()
@@ -1767,8 +2026,9 @@ def main():
     automation_scheduler.add_job(evaluate_all_rules, "interval", seconds=60, id="rule_engine_tick")
     automation_scheduler.add_job(evaluate_workflows, "interval", seconds=30, id="workflow_engine_tick")
     automation_scheduler.add_job(evaluate_scheduled_messages, "interval", seconds=30, id="message_scheduler_tick")
+    automation_scheduler.add_job(evaluate_dex_alerts, "interval", seconds=300, id="dex_alert_tick")
     automation_scheduler.start()
-    logger.info("⚡ Automation scheduler started: rules(60s) + workflows(30s) + messages(30s)")
+    logger.info("⚡ Automation scheduler started: rules(60s) + workflows(30s) + messages(30s) + dex_alerts(300s)")
 
     app = (
         ApplicationBuilder()
@@ -1825,6 +2085,11 @@ def main():
     app.add_handler(CommandHandler("transact", cmd_transact))
     app.add_handler(CommandHandler("whale_alert", cmd_whale_alert))
     app.add_handler(CommandHandler("pending_swaps", cmd_pending_swaps))
+
+    # DEX Screener
+    app.add_handler(CommandHandler("dex", cmd_dex))
+    app.add_handler(CommandHandler("dex_trending", cmd_dex_trending))
+    app.add_handler(CommandHandler("dex_alerts", cmd_dex_alerts))
 
     # Free-text, Callback Queries & Web App Data
     app.add_handler(CallbackQueryHandler(handle_callback_query))

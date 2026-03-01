@@ -442,6 +442,50 @@ async def health():
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  DEX SCREENER API — Frontend integration
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/api/dex/search")
+async def dex_search(q: str):
+    """Search DEX Screener for token pairs."""
+    from dex_screener import search_pairs, format_pair_data
+    pairs = await search_pairs(q)
+    formatted = [format_pair_data(p) for p in pairs[:10]]
+    return {"pairs": formatted, "total": len(pairs)}
+
+
+@app.get("/api/dex/trending")
+async def dex_trending():
+    """Get trending tokens with AI analysis."""
+    from dex_screener import get_trending_with_analysis
+    result = await get_trending_with_analysis()
+    return result
+
+
+@app.get("/api/dex/boosted")
+async def dex_boosted():
+    """Get top boosted tokens."""
+    from dex_screener import get_top_boosted, format_pair_data, get_token_data
+    import asyncio as _aio
+    boosted = await get_top_boosted()
+    if not boosted:
+        return {"tokens": []}
+
+    enriched = []
+    for token in boosted[:10]:
+        chain = token.get("chainId", "")
+        address = token.get("tokenAddress", "")
+        if chain and address:
+            pairs = await get_token_data(chain, address)
+            if pairs:
+                best = max(pairs, key=lambda p: p.get("volume", {}).get("h24", 0))
+                enriched.append(format_pair_data(best))
+            await _aio.sleep(0.15)
+
+    return {"tokens": enriched}
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  PENDING TRANSACTION API — Mini App ↔ Backend handoff
 # ═══════════════════════════════════════════════════════════════════
 

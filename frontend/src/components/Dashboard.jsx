@@ -7,6 +7,7 @@ import TaskQueue from './TaskQueue'
 import PiPAgent from './PiPAgent'
 import VoiceAssistant from './VoiceAssistant'
 import YouTubeResearch from './YouTubeResearch'
+import DexScreener from './DexScreener'
 
 const WS_URL = 'ws://localhost:8000/ws'
 const API_BASE = 'http://localhost:8000'
@@ -437,6 +438,15 @@ export default function Dashboard() {
             >
               <VoiceAssistant onIntentAction={handleVoiceIntent} />
               <YouTubeResearch />
+            </motion.div>
+
+            {/* DEX Screener — Full width */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.26, ease: 'easeOut' }}
+            >
+              <DexScreener />
             </motion.div>
 
             <motion.div
