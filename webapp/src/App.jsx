@@ -74,143 +74,42 @@ class ErrorBoundary extends Component {
   }
 }
 
-// ─── Connect Mode: Lute wallet integration + paste fallback ─────
+// ─── Connect Mode: paste address from Lute (Mini App can't access Chrome extensions) ──
 function ConnectMode() {
   const [address, setAddress] = useState('')
   const [status, setStatus] = useState(null)
   const [errorMsg, setErrorMsg] = useState('')
   const [balance, setBalance] = useState(null)
-  const [luteAvailable, setLuteAvailable] = useState(false)
-  const [luteConnecting, setLuteConnecting] = useState(false)
   const sentRef = useRef(false)
 
-  log('ConnectMode rendered')
-
-  // Detect Lute wallet extension on mount
-  useEffect(() => {
-    const checkLute = () => {
-      if (window.algorand) {
-        setLuteAvailable(true)
-        log('Lute wallet extension detected (window.algorand)')
-      } else {
-        log('Lute wallet not detected — paste fallback mode')
-      }
-    }
-    // Check immediately and also after a short delay (extension may inject late)
-    checkLute()
-    const timer = setTimeout(checkLute, 500)
-    return () => clearTimeout(timer)
-  }, [])
-
-  // ── Connect via Lute wallet extension ──
-  const handleLuteConnect = async () => {
-    if (!window.algorand) {
-      setErrorMsg('Lute Wallet extension not found. Please install it from lute.app')
-      return
-    }
-
-    setLuteConnecting(true)
-    setErrorMsg('')
-    setStatus('checking')
-
-    try {
-      log('Requesting Lute wallet connection via window.algorand.enable()...')
-
-      // Enable the wallet — this prompts the user in Lute to approve
-      const result = await window.algorand.enable({ genesisID: 'testnet-v1.0' })
-      log(`Lute enable result: ${JSON.stringify(result).slice(0, 300)}`)
-
-      const accounts = result?.accounts || result?.addresses || []
-      if (!accounts.length) {
-        // Try alternative: some Lute versions return differently
-        const altAccounts = result?.genesisAccounts || []
-        if (altAccounts.length) {
-          accounts.push(...altAccounts)
-        }
-      }
-
-      if (!accounts.length) {
-        setErrorMsg('No accounts found in Lute. Please create a TestNet account first.')
-        setStatus('error')
-        setLuteConnecting(false)
-        return
-      }
-
-      // Use the first account address
-      const walletAddress = typeof accounts[0] === 'string' ? accounts[0] : accounts[0]?.address
-      log(`Lute account: ${walletAddress}`)
-
-      if (!isValidAlgoAddress(walletAddress)) {
-        setErrorMsg(`Invalid address from Lute: ${walletAddress?.slice(0, 20)}...`)
-        setStatus('error')
-        setLuteConnecting(false)
-        return
-      }
-
-      setAddress(walletAddress)
-
-      // Verify on TestNet and get balance
-      if (algodClient) {
-        try {
-          const info = await algodClient.accountInformation(walletAddress).do()
-          const bal = (info['amount'] || 0) / 1e6
-          setBalance(bal)
-          log(`Lute wallet verified! Balance: ${bal} ALGO`)
-        } catch (e) {
-          log(`Balance fetch warning: ${e.message}`)
-          // Still proceed even if balance fetch fails
-        }
-      }
-
-      setStatus('success')
-
-      // Send to Telegram bot
-      if (tg && !sentRef.current) {
-        sentRef.current = true
-        setTimeout(() => {
-          const data = JSON.stringify({
-            action: 'wallet_connected',
-            address: walletAddress,
-            balance: balance || 0,
-            method: 'lute_extension',
-          })
-          log(`sendData: ${data}`)
-          tg.sendData(data)
-          tg.close()
-        }, 1500)
-      }
-
-    } catch (e) {
-      log(`Lute connect failed: ${e.message}`)
-      if (e.message?.includes('rejected') || e.message?.includes('denied') || e.code === 4001) {
-        setErrorMsg('Connection rejected by user. Please approve in Lute popup.')
-      } else {
-        setErrorMsg(`Lute connection failed: ${e.message}. Try pasting your address manually below.`)
-      }
-      setStatus('error')
-    }
-
-    setLuteConnecting(false)
-  }
+  const isTelegramWebView = !!tg
+  log(`ConnectMode rendered — isTelegram=${isTelegramWebView}`)
 
   const handlePaste = async () => {
     try {
       const text = await navigator.clipboard.readText()
-      setAddress(text.trim())
+      const trimmed = text.trim()
+      setAddress(trimmed)
       setErrorMsg('')
-      log('Pasted from clipboard')
+      log(`Pasted from clipboard: ${trimmed.slice(0, 12)}...`)
+
+      // Auto-submit if it looks like a valid address
+      if (isValidAlgoAddress(trimmed)) {
+        log('Valid address detected after paste — auto-verifying...')
+        await verifyAndConnect(trimmed)
+      }
     } catch (e) {
-      setErrorMsg('Clipboard access denied. Please paste manually.')
+      setErrorMsg('Clipboard access denied — please long-press the input field and paste manually.')
       log(`Clipboard error: ${e.message}`)
     }
   }
 
-  const handleSubmit = async () => {
-    const trimmed = address.trim()
-    log(`Submit: ${trimmed.slice(0, 10)}... (${trimmed.length} chars)`)
+  const verifyAndConnect = async (addr) => {
+    const trimmed = (addr || address).trim()
+    log(`Verifying: ${trimmed.slice(0, 10)}... (${trimmed.length} chars)`)
 
     if (!isValidAlgoAddress(trimmed)) {
-      setErrorMsg('Invalid Algorand address (must be 58 characters, base32).')
+      setErrorMsg('Invalid Algorand address — must be 58 characters, base32 encoded.')
       setStatus('error')
       return
     }
@@ -228,6 +127,7 @@ function ConnectMode() {
       const info = await algodClient.accountInformation(trimmed).do()
       const bal = (info['amount'] || 0) / 1e6
       setBalance(bal)
+      setAddress(trimmed)
       setStatus('success')
       log(`Verified! Balance: ${bal} ALGO`)
 
@@ -238,7 +138,7 @@ function ConnectMode() {
           log(`sendData: ${data}`)
           tg.sendData(data)
           tg.close()
-        }, 1000)
+        }, 1200)
       }
     } catch (e) {
       log(`Verification failed: ${e.message}`)
@@ -272,66 +172,55 @@ function ConnectMode() {
           <p style={{ fontSize: 13, color: '#8B949E', marginTop: 6 }}>Link your Algorand TestNet wallet</p>
         </div>
 
-        {/* Lute Wallet Connect Button (primary method) */}
-        <div style={{ ...S.card, margin: '20px 0 16px', borderColor: luteAvailable ? '#238636' : '#30363D' }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12 }}>
-            <span style={{ fontSize: 22 }}>�</span>
-            <div>
-              <h3 style={{ fontSize: 14, margin: 0, color: '#E6EDF3' }}>Connect with Lute Wallet</h3>
-              <p style={{ fontSize: 11, margin: '2px 0 0', color: luteAvailable ? '#3FB950' : '#8B949E' }}>
-                {luteAvailable ? '✅ Lute extension detected' : '⚠️ Lute extension not detected'}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={handleLuteConnect}
-            disabled={!luteAvailable || luteConnecting || status === 'checking'}
-            style={{
-              ...S.btn,
-              width: '100%', padding: '14px 0', fontSize: 15,
-              background: luteAvailable
-                ? 'linear-gradient(90deg,#238636,#2EA043)'
-                : '#21262D',
-              cursor: (!luteAvailable || luteConnecting) ? 'not-allowed' : 'pointer',
-              opacity: (!luteAvailable || luteConnecting) ? 0.5 : 1,
-            }}
-          >
-            {luteConnecting ? '⏳ Connecting to Lute…' : '🔗 Connect Lute Wallet'}
-          </button>
-          {!luteAvailable && (
-            <p style={{ fontSize: 11, color: '#8B949E', marginTop: 8, textAlign: 'center' }}>
-              Install <a href="https://lute.app" style={{ color: '#58A6FF' }} target="_blank" rel="noreferrer">Lute Wallet</a> Chrome extension first
+        {/* Step-by-step instructions */}
+        <div style={{ ...S.card, margin: '20px 0 16px', borderColor: '#58A6FF' }}>
+          <div style={{ fontSize: 13, color: '#E6EDF3', lineHeight: 2 }}>
+            <p style={{ margin: '0 0 4px', fontWeight: 700, color: '#58A6FF' }}>📋 Quick Steps:</p>
+            <p style={{ margin: 0 }}>
+              <strong style={{ color: '#3FB950' }}>1.</strong> Open <strong>Lute Wallet</strong> in Chrome → copy your address
             </p>
-          )}
-        </div>
-
-        {/* Divider */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '4px 0' }}>
-          <div style={{ flex: 1, height: 1, background: '#21262D' }} />
-          <span style={{ fontSize: 11, color: '#484F58' }}>OR paste address manually</span>
-          <div style={{ flex: 1, height: 1, background: '#21262D' }} />
-        </div>
-
-        {/* Manual Input card (fallback) */}
-        <div style={S.card}>
-          <label style={{ fontSize: 12, color: '#8B949E', display: 'block', marginBottom: 6 }}>Algorand TestNet Address</label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              type="text"
-              value={address}
-              onChange={(e) => { setAddress(e.target.value); setErrorMsg(''); setStatus(null) }}
-              placeholder="Paste your 58-character address…"
-              spellCheck="false"
-              autoComplete="off"
-              style={{
-                flex: 1, background: 'rgba(0,0,0,0.3)', border: '1px solid #30363D', borderRadius: 8,
-                padding: '10px 12px', color: '#E6EDF3', fontSize: 13, fontFamily: 'monospace', outline: 'none',
-              }}
-            />
-            <button onClick={handlePaste} style={{ ...S.btn, background: '#21262D', padding: '10px 14px', fontSize: 16 }}>
-              📋
-            </button>
+            <p style={{ margin: 0 }}>
+              <strong style={{ color: '#3FB950' }}>2.</strong> Tap the big <strong>📋 Paste Address</strong> button below
+            </p>
+            <p style={{ margin: 0 }}>
+              <strong style={{ color: '#3FB950' }}>3.</strong> We auto-verify on TestNet & connect ✨
+            </p>
           </div>
+        </div>
+
+        {/* BIG paste button — primary action */}
+        <button
+          onClick={handlePaste}
+          disabled={status === 'checking'}
+          style={{
+            ...S.btn,
+            width: '100%', padding: '18px 0', fontSize: 18,
+            background: status === 'checking' ? '#21262D' : 'linear-gradient(90deg,#238636,#2EA043)',
+            cursor: status === 'checking' ? 'not-allowed' : 'pointer',
+            borderRadius: 14,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+            marginBottom: 16,
+          }}
+        >
+          {status === 'checking' ? '⏳ Verifying on TestNet…' : '📋 Paste Address from Lute'}
+        </button>
+
+        {/* Manual input fallback */}
+        <div style={S.card}>
+          <label style={{ fontSize: 12, color: '#8B949E', display: 'block', marginBottom: 6 }}>Or type / paste manually:</label>
+          <input
+            type="text"
+            value={address}
+            onChange={(e) => { setAddress(e.target.value); setErrorMsg(''); setStatus(null) }}
+            placeholder="Paste your 58-character address…"
+            spellCheck="false"
+            autoComplete="off"
+            style={{
+              width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid #30363D', borderRadius: 8,
+              padding: '12px', color: '#E6EDF3', fontSize: 13, fontFamily: 'monospace', outline: 'none',
+              boxSizing: 'border-box',
+            }}
+          />
 
           {address && (
             <p style={{ fontSize: 11, marginTop: 6, color: isValidAlgoAddress(address.trim()) ? '#3FB950' : '#8B949E' }}>
@@ -346,28 +235,39 @@ function ConnectMode() {
           )}
 
           <button
-            onClick={handleSubmit}
+            onClick={() => verifyAndConnect()}
             disabled={!address.trim() || status === 'checking'}
             style={{
               ...S.btn,
-              width: '100%', marginTop: 14, padding: '12px 0', fontSize: 15,
+              width: '100%', marginTop: 12, padding: '12px 0', fontSize: 15,
               background: (!address.trim() || status === 'checking') ? '#21262D' : 'linear-gradient(90deg,#238636,#2EA043)',
               cursor: (!address.trim() || status === 'checking') ? 'not-allowed' : 'pointer',
               opacity: (!address.trim() || status === 'checking') ? 0.5 : 1,
             }}
           >
-            {status === 'checking' ? '⏳ Verifying on TestNet…' : '🔗 Connect Wallet'}
+            🔗 Verify & Connect
           </button>
         </div>
 
         {/* Setup guide */}
         <div style={{ ...S.card, marginTop: 16 }}>
-          <h3 style={{ fontSize: 13, color: '#8B949E', margin: '0 0 8px', fontWeight: 600 }}>ℹ️ Setup Guide</h3>
+          <h3 style={{ fontSize: 13, color: '#8B949E', margin: '0 0 8px', fontWeight: 600 }}>ℹ️ Don't have Lute yet?</h3>
           <ul style={{ fontSize: 12, color: '#8B949E', margin: 0, paddingLeft: 16, lineHeight: 2.2 }}>
             <li>Install <a href="https://lute.app" style={{ color: '#58A6FF' }} target="_blank" rel="noreferrer">Lute Wallet</a> Chrome extension</li>
             <li>Switch to <strong>Algorand TestNet</strong> in Lute settings</li>
             <li>Fund via <a href="https://bank.testnet.algorand.network/" style={{ color: '#58A6FF' }} target="_blank" rel="noreferrer">TestNet Dispenser</a></li>
+            <li>Copy your address → come back here & paste</li>
           </ul>
+        </div>
+
+        {/* Why paste explanation */}
+        <div style={{ ...S.card, marginTop: 12, borderColor: '#30363D' }}>
+          <p style={{ fontSize: 11, color: '#484F58', margin: 0, lineHeight: 1.6 }}>
+            💡 <strong>Why paste?</strong> Telegram Mini Apps run in a secure WebView —
+            Chrome extensions like Lute can't connect directly here. Simply copy your
+            address from Lute in Chrome, then paste it above. Your wallet is verified
+            on-chain before connecting.
+          </p>
         </div>
 
         {/* Network badge */}
@@ -386,6 +286,7 @@ function ConnectMode() {
 Telegram SDK: ${tg ? 'YES v' + (tg.version || '?') : 'NO'}
 algosdk: ${algosdk ? 'YES' : 'NO'}
 algodClient: ${algodClient ? 'YES' : 'NO'}
+WebView: ${isTelegramWebView ? 'Telegram Mini App' : 'Regular Browser'}
 URL: ${window.location.href}
 UA: ${navigator.userAgent.slice(0, 120)}
 Logs:
